@@ -1545,7 +1545,17 @@ def strip_block(text: str) -> str:
 
 
 def rc_path_for(shell: str) -> str:
-    return expand("~/.zshrc" if shell == "zsh" else "~/.bashrc")
+    return expand("~/.zshrc" if shell != "bash" else "~/.bashrc")
+
+
+def require_shell():
+    """拿到可用的 shell 名；不支持时给出明确提示并返回 None。"""
+    shell = guess_shell()
+    if not shell:
+        fail(f"不支持 $SHELL={os.environ.get('SHELL') or '(空)'}，目前只会写 zsh / bash 的配置")
+        note(f"可以用 `{PROG} --shell-init zsh` 看片段，手动加到你的 shell 配置里")
+        return None
+    return shell
 
 
 def install_shell(shell: str, targets, quiet=False):
@@ -1596,7 +1606,19 @@ def uninstall_shell(shell: str, quiet=False):
 
 
 def guess_shell() -> str:
-    return "bash" if "bash" in os.environ.get("SHELL", "") else "zsh"
+    """从 $SHELL 判断该写哪个 rc 文件。
+
+    只支持 zsh / bash。其它 shell（fish、tcsh…）没有对应写法，
+    硬猜会写出一个永远不会被加载的文件，所以明确报错而不是瞎猜。
+    """
+    name = os.path.basename(os.environ.get("SHELL", "") or "")
+    if "zsh" in name:
+        return "zsh"
+    if "bash" in name:
+        return "bash"
+    if not name:
+        return "zsh"
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -2257,12 +2279,17 @@ def _print_manager_table(st: Settings):
         print(f"  {_pad(name, 12)}{_pad('✓' if installed else '-', 8)}"
               f"{'✓' if name in active else '-'}")
     note(f"用法：`{PROG} setup <名字…>` 接管，`{PROG} putes <名字…>` 取消，all 表示全部")
-    note(f"改完需要新开终端或 `source {rc_path_for(guess_shell())}` 才生效")
+    note(f"改「接管哪些命令」要新开终端或 `exec {guess_shell() or 'zsh'}` 才生效；"
+         f"改语言 / 密钥 / 开关是立刻生效的")
 
 
 def _write_targets(st: Settings, targets) -> bool:
     # 先落 shell 配置，成功了再写状态，避免失败时留下半改的状态
     shell = guess_shell()
+    if not shell:
+        fail(f"不支持 $SHELL={os.environ.get('SHELL')}，只支持 zsh / bash")
+        note("可以手动加一行：function pacman { pkgtrans pacman $argv; }（fish 语法示例）")
+        return False
     value = ",".join(targets) if targets else "none"
     if not install_shell(shell, targets, quiet=True):
         return False
@@ -2270,7 +2297,10 @@ def _write_targets(st: Settings, targets) -> bool:
         fail(f"写入配置失败：{st.config_path}")
         return False
     st.set("shell_targets", value, "cli")
-    ok(f"已更新 {rc_path_for(shell)} 的 shell 集成（当前接管：{', '.join(targets) or '无'}）")
+    rc = rc_path_for(shell)
+    ok(f"已更新 {rc} 的 shell 集成（当前接管：{', '.join(targets) or '无'}）")
+    note(f"新开终端或 `exec {shell}` 后生效"
+         f"（运行中的 shell 不会自己重读 {os.path.basename(rc)}）")
     return True
 
 
@@ -2395,9 +2425,11 @@ def dispatch_subcommand(name: str, rest):
     if name == "show-config":
         return do_show_config(st)
     if name == "install-shell":
-        return 0 if install_shell(guess_shell(), shell_targets(st)) else 1
+        shell = require_shell()
+        return 1 if shell is None else (0 if install_shell(shell, shell_targets(st)) else 1)
     if name == "uninstall-shell":
-        return uninstall_shell(guess_shell())
+        shell = require_shell()
+        return 1 if shell is None else uninstall_shell(shell)
     fail(f"未知子命令 {name}")
     return 2
 
@@ -2425,10 +2457,14 @@ def main(argv):
         write_stdout(shell_snippet(shell, shell_targets(st0)))
         return 0
     if cli.get("install_shell"):
+        shell = require_shell()
+        if shell is None:
+            return 1
         st0 = load_settings(cli)
-        return 0 if install_shell(guess_shell(), shell_targets(st0)) else 1
+        return 0 if install_shell(shell, shell_targets(st0)) else 1
     if cli.get("uninstall_shell"):
-        return uninstall_shell(guess_shell())
+        shell = require_shell()
+        return 1 if shell is None else uninstall_shell(shell)
 
     st = load_settings(cli)
     for err in st.errors:

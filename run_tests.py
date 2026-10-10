@@ -603,6 +603,9 @@ if "search" in argv:
           f"{err!r}"[:200])
     code, out, err = run(["putesy", "flatpak"], **common)   # setup 反写的错拼也认
     check("putesy 别名可用（setup 反写）", code == 0 and "flatpak()" not in open(zshrc).read())
+    code, out, err = run(["setup", "pamac"], env_extra={"SHELL": "/usr/bin/fish"}, **common)
+    check("不支持的 shell：明确报错而不是瞎写 .zshrc",
+          code == 1 and "不支持" in err, f"code={code} {err!r}"[:200])
 
     code, out, err = run(["off"], **common)
     check("off：提示已关闭并写盘", "已关闭" in err and "enabled = 0" in open(cfg).read(),
