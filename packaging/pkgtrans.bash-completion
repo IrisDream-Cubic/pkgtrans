@@ -1,0 +1,32 @@
+# bash 补全：装到 /usr/share/bash-completion/completions/pkgtrans
+
+_pkgtrans_completions() {
+  local cur
+  cur="${COMP_WORDS[COMP_CWORD]}"
+
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "help info check status aim keyadd keylist keyprefer \
+keyremove keylock keyunlock setup putes putesy unsetup on off clear-cache \
+show-config install-shell uninstall-shell" -- "$cur") )
+    return
+  fi
+
+  case "${COMP_WORDS[1]}" in
+    aim)
+      COMPREPLY=( $(compgen -W "default zh-hans zh-hant ja-jpan ko-kore eo-latn en-latn \
+fr-latn de-latn ru-cyrl" -- "$cur") )
+      ;;
+    setup|putes|putesy|unsetup)
+      COMPREPLY=( $(compgen -W "all pacman yay paru pamac flatpak" -- "$cur") )
+      ;;
+    keyprefer|keyremove)
+      COMPREPLY=( $(compgen -W "$(pkgtrans keylist 2>/dev/null |
+        sed -n 's/^ *[* ]*\([0-9][0-9]*\) ->.*/\1/p')" -- "$cur") )
+      ;;
+    *)
+      COMPREPLY=( $(compgen -c -- "$cur") )
+      ;;
+  esac
+}
+
+complete -F _pkgtrans_completions pkgtrans

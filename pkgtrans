@@ -2043,9 +2043,7 @@ def do_clear_cache(st: Settings) -> int:
 
 def cmd_aim(st: Settings, args) -> int:
     if not args:
-        print(f"当前目标语言：{st['target_lang']}")
-        note(f"可用代码：default(简体中文) zh-hant ja-jpan ko-kore eo-latn en-latn …")
-        note(f"也可以直接写语言名，如 `{PROG} aim 文言文`")
+        print(st["target_lang"])
         return 0
     raw = " ".join(args).strip()
     if not raw:
@@ -2055,9 +2053,7 @@ def cmd_aim(st: Settings, args) -> int:
     if not update_config_value(st.config_path, "target_lang", lang):
         fail(f"写入配置失败：{st.config_path}")
         return 1
-    suffix = f"（代码 {raw}）" if raw.lower() != lang.lower() else ""
-    ok(f"目标语言已设为 {lang}{suffix}")
-    note(f"写入 {st.config_path}，立即生效（缓存按语言分开，不会串味）")
+    ok(f"目标语言已设为 {lang}")
     return 0
 
 
@@ -2073,19 +2069,15 @@ def _print_keys(keys, preferred, locked):
         print(f" {mark}{k.get('id'):>2} -> {str(k.get('provider','')):<{width}}"
               f"  |  {mask_key(k.get('key',''))}")
     first = next((k for k in keys if k.get("id") == preferred), keys[0])
-    tail = "，已锁定（只用这一个）" if locked else ""
+    tail = "，已锁定" if locked else ""
     print()
     print(f"     共 {len(keys)} 个 API key，当前优先："
           f"{first.get('provider')} {mask_key(first.get('key',''))}{tail}")
-    if not locked and len(keys) > 1:
-        print(f"     优先密钥失败时会自动切换到其它 {len(keys)-1} 个")
 
 
 def cmd_keylist(st: Settings) -> int:
     keys, preferred, locked = load_keys(st.keys_path)
     _print_keys(keys, preferred, locked)
-    if keys:
-        note(f"密钥库：{st.keys_path}")
     return 0
 
 
@@ -2205,11 +2197,6 @@ def cmd_keyadd(st: Settings, args) -> int:
         preferred = entry["id"]
     save_keys(st.keys_path, keys, preferred, locked)
     ok(f"已添加 {provider} 密钥 {mask_key(key)}（编号 {entry['id']}）")
-    note(f"地址：{backend.base}")
-    note(f"模型：{model or '(服务商默认)'}")
-    note(f"密钥库：{st.keys_path}（权限 600）")
-    print()
-    _print_keys(keys, preferred, locked)
     return 0
 
 
@@ -2241,10 +2228,7 @@ def cmd_keyremove(st: Settings, args) -> int:
     save_keys(st.keys_path, keys, preferred, locked)
     ok(f"已删除 [{target.get('id')}] {target.get('provider')} "
        f"{mask_key(target.get('key', ''))}")
-    if keys:
-        nxt = next((k for k in keys if k.get("id") == preferred), keys[0])
-        note(f"当前优先：{nxt.get('provider')} {mask_key(nxt.get('key',''))}")
-    else:
+    if not keys:
         warn("密钥库已空，将回落到配置文件 / 环境变量里的服务商")
     return 0
 
@@ -2259,9 +2243,7 @@ def cmd_keyprefer(st: Settings, args) -> int:
         print(f"当前优先：{first.get('provider')} {mask_key(first.get('key',''))}"
               f"（编号 {first.get('id')}）")
         if locked:
-            note("已锁定：只会用它，不会切换到备用密钥")
-        else:
-            note(f"未锁定：失败时会依次尝试其余 {len(keys)-1} 个备用密钥")
+            note("已锁定")
         return 0
     target = _find_key(keys, args[0])
     if target is None:
@@ -2282,7 +2264,6 @@ def cmd_keylock(st: Settings, lock: bool) -> int:
     first = next((k for k in keys if k.get("id") == preferred), keys[0])
     if lock:
         ok(f"已锁定：只使用 {first.get('provider')} {mask_key(first.get('key',''))}")
-        note(f"`{PROG} keyunlock` 可恢复「失败时自动切换备用密钥」")
     else:
         ok(f"已解锁：优先 {first.get('provider')} {mask_key(first.get('key',''))}"
            f"，失败时自动切换备用密钥")
@@ -2303,17 +2284,16 @@ def _print_manager_table(st: Settings):
         installed = shutil.which(name) is not None
         print(f"  {_pad(name, 12)}{_pad('✓' if installed else '-', 8)}"
               f"{'✓' if name in active else '-'}")
-    note(f"用法：`{PROG} setup <名字…>` 接管，`{PROG} putes <名字…>` 取消，all 表示全部")
-    note(f"改「接管哪些命令」要 {_restart_hint()}")
-    note("改语言 / 密钥 / 开关是立刻生效的，不用重启 shell")
+    note(f"`{PROG} setup <名字…>` 接管 / `{PROG} putes <名字…>` 取消（all = 全部）")
+    note(f"接管项改动需 {_restart_hint()}；语言 / 密钥 / 开关是立即生效的")
 
 
 def _restart_hint() -> str:
-    """「怎么让新的 shell 集成生效」的一句话，把 shell 和终端两层的名字都点出来。"""
+    """「怎么让新的 shell 集成生效」的一句话，把窗口和 shell 两层的名字都点出来。"""
     shell = guess_shell() or "zsh"
     term = terminal_name()
     where = f"新开一个 {term} 窗口" if term else "新开一个终端窗口"
-    return f"{where}，或在当前 shell 里 `exec {shell}` 后生效"
+    return f"{where}或 `exec {shell}` 后生效"
 
 
 def _write_targets(st: Settings, targets) -> bool:
@@ -2330,10 +2310,8 @@ def _write_targets(st: Settings, targets) -> bool:
         fail(f"写入配置失败：{st.config_path}")
         return False
     st.set("shell_targets", value, "cli")
-    rc = rc_path_for(shell)
-    ok(f"已更新 {rc} 的 shell 集成（当前接管：{', '.join(targets) or '无'}）")
+    ok(f"已接管：{', '.join(targets) or '无'}")
     note(_restart_hint())
-    note(f"（{shell} 是你的登录 shell；运行中的它不会自己重读 {os.path.basename(rc)}）")
     return True
 
 
@@ -2356,19 +2334,17 @@ def cmd_setup(st: Settings, args) -> int:
     names = _resolve_manager_args(args)
     unknown = [n for n in names if n not in KNOWN_MANAGERS]
     if unknown:
-        warn(f"这些不在已知列表里，仍会照写：{', '.join(unknown)}")
+        warn(f"不在已知列表里，仍会照写：{', '.join(unknown)}")
     current = shell_targets(st)
     added = [n for n in names if n not in current]
-    merged = current + added
-    if not _write_targets(st, merged):
+    if not added:
+        warn("本来就已接管")
+        return 0
+    if not _write_targets(st, current + added):
         return 1
-    if added:
-        ok(f"已为 {', '.join(added)} 启用翻译")
-    else:
-        warn("这些包管理器本来就已接管")
-    for n in added:
-        if not shutil.which(n):
-            warn(f"{n} 没有安装，装上后会自动生效")
+    missing = [n for n in added if not shutil.which(n)]
+    if missing:
+        warn(f"{', '.join(missing)} 没有安装，装上后自动生效")
     return 0
 
 
@@ -2377,18 +2353,14 @@ def cmd_putes(st: Settings, args) -> int:
         _print_manager_table(st)
         return 0
     names = _resolve_manager_args(args)
-    if "all" in [a for a in args]:
+    if "all" in args:
         names = shell_targets(st)
     current = shell_targets(st)
     removed = [n for n in names if n in current]
-    merged = [n for n in current if n not in removed]
-    if not _write_targets(st, merged):
-        return 1
-    if removed:
-        ok(f"已取消 {', '.join(removed)} 的翻译")
-    else:
-        warn("这些本来就没接管")
-    return 0
+    if not removed:
+        warn("本来就没接管")
+        return 0
+    return 0 if _write_targets(st, [n for n in current if n not in removed]) else 1
 
 
 # ------------------------------------------------------------------ on/off
@@ -2398,15 +2370,11 @@ def cmd_onoff(st: Settings, enable: bool) -> int:
         fail(f"写入配置失败：{st.config_path}")
         return 1
     if enable:
-        ok("已开启 pkgtrans，搜索时会自动翻译")
-        usable = usable_backends(st)
-        if usable:
-            note(f"后端：{usable[0].label()}")
-        else:
-            warn("还没有可用的 API 密钥，跑 `pkgtrans keyadd` 或 `pkgtrans check` 看看")
+        ok("已开启")
+        if not usable_backends(st):
+            warn("还没有可用的 API 密钥，跑 `pkgtrans keyadd`")
     else:
-        ok("已关闭 pkgtrans，所有命令原样透传")
-        note(f"`{PROG} on` 随时恢复")
+        ok("已关闭，所有命令原样透传")
     return 0
 
 

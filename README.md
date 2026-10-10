@@ -40,6 +40,80 @@ extra/neovide 0.16.2-2
 | `~/.cache/pkgtrans/cache.json` | 翻译缓存，可随时删 |
 | `~/.local/share/pkgtrans/run_tests.py` | 自测脚本（本地 mock API，不联网、不花钱） |
 
+## 安装
+
+### Arch / Manjaro
+
+```sh
+git clone https://github.com/IrisDream-Cubic/pkgtrans
+cd pkgtrans/packaging
+makepkg -si
+```
+
+或者直接从 Release 里下 `.pkg.tar.zst`：
+
+```sh
+sudo pacman -U pkgtrans-1.0-1-any.pkg.tar.zst
+```
+
+（AUR 上架后 `yay -S pkgtrans` 即可。）
+
+### Debian / Ubuntu
+
+```sh
+sudo apt install ./pkgtrans_1.0-1_all.deb
+# 或
+sudo dpkg -i pkgtrans_1.0-1_all.deb
+```
+
+### Fedora / RHEL / openSUSE
+
+```sh
+sudo rpm -ivh pkgtrans-1.0-1.noarch.rpm
+# 或
+sudo dnf install ./pkgtrans-1.0-1.noarch.rpm
+```
+
+### Nix / NixOS
+
+```sh
+# 临时用一次
+nix run github:IrisDream-Cubic/pkgtrans -- keylist
+
+# 装进 profile
+nix profile install github:IrisDream-Cubic/pkgtrans
+
+# 或者在 configuration.nix 里
+#   environment.systemPackages = [ (pkgs.callPackage (fetchTarball "...") { }) ];
+```
+
+### 其它发行版 / 不想用包管理器
+
+```sh
+./install.sh --user      # 装到 ~/.local，不需要 root
+./install.sh             # 装到 /usr/local
+./install.sh --uninstall # 卸载
+```
+
+### 其实一个文件就够了
+
+`pkgtrans` 是**单文件、只用 Python 标准库**的脚本。把仓库里那个 `pkgtrans`
+复制到任何有 Python 3.9+ 的地方、`chmod +x`，就能跑。包管理器提供的只是
+补全、文档和 `/usr/bin` 里的软链。
+
+### 打包产物对照
+
+| 格式 | 文件 | 构建方式 |
+| --- | --- | --- |
+| Arch | `pkgtrans-1.0-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
+| deb | `pkgtrans_1.0-1_all.deb` | `dpkg-deb`，没有则用 `packaging/build-deb.py` 手工组装 |
+| rpm | `pkgtrans-1.0-1.noarch.rpm` | `rpmbuild -ba packaging/pkgtrans.spec` |
+| Nix | flake 输出 | `nix build .#`（`flake.nix` + `default.nix`） |
+| 源码 | `pkgtrans-1.0.tar.gz` | `sh packaging/build-source-tarball.sh` |
+
+一次性全构建：`sh packaging/build-all.sh`（本机缺的工具链会明确跳过）。
+四个格式的完整构建与安装验证在 CI 里跑：见 `.github/workflows/release.yml`。
+
 ## 快速开始
 
 ```sh

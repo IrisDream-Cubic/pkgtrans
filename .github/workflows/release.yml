@@ -1,0 +1,162 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号（不带 v）
+        default: '1.0'
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  source:
+    name: 源码 tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 生成
+        run: sh packaging/build-source-tarball.sh "${VERSION#v}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-tarball
+          path: dist/*.tar.gz
+
+  test:
+    name: 发布前自测
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 run_tests.py
+
+  arch:
+    name: Arch 软件包
+    needs: source
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-tarball
+          path: dist
+      - name: 依赖
+        run: pacman -Syu --noconfirm --needed base-devel python
+      - name: makepkg
+        run: |
+          tmp=$(mktemp -d)
+          cp packaging/PKGBUILD "$tmp/"
+          cp dist/pkgtrans-*.tar.gz "$tmp/"
+          chown -R nobody "$tmp"
+          cd "$tmp"
+          su nobody -s /bin/sh -c "makepkg -f --nodeps --noconfirm"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp ./*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/"
+      - name: 装进容器验证
+        run: pacman -U --noconfirm dist/*.pkg.tar.zst && pkgtrans --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.zst
+
+  deb:
+    name: deb 软件包
+    needs: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-tarball
+          path: dist
+      - name: 构建（优先用 dpkg-deb）
+        run: python3 packaging/build-deb.py --outdir dist --version "${VERSION#v}"
+      - name: 用 dpkg/apt 真装一遍
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ./dist/pkgtrans_*_all.deb
+          pkgtrans --version
+          pkgtrans help > /dev/null
+          test -f /usr/share/zsh/site-functions/_pkgtrans
+      - name: lintian 检查
+        run: |
+          sudo apt-get install -y lintian || true
+          lintian --fail-on error dist/*.deb || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: dist/*.deb
+
+  rpm:
+    name: rpm 软件包
+    needs: source
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-tarball
+          path: dist
+      - name: 依赖
+        run: dnf install -y rpm-build python3
+      - name: rpmbuild
+        run: |
+          mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          cp dist/pkgtrans-*.tar.gz ~/rpmbuild/SOURCES/
+          rpmbuild -ba --define "_topdir $HOME/rpmbuild" packaging/pkgtrans.spec
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp ~/rpmbuild/RPMS/noarch/*.rpm "$GITHUB_WORKSPACE/dist/"
+      - name: 装进系统验证
+        run: rpm -ivh dist/*.noarch.rpm && pkgtrans --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: dist/*.rpm
+
+  nix:
+    name: Nix 包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - name: 构建
+        run: |
+          nix build .# --print-build-logs
+          ./result/bin/pkgtrans --version
+      - name: 打成 tarball 附件
+        run: |
+          mkdir -p dist
+          tar -czf "dist/pkgtrans-${VERSION#v}-nix-x86_64-linux.tar.gz" -C result .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nix-package
+          path: dist/*nix*.tar.gz
+
+  release:
+    name: 发 Release
+    needs: [arch, deb, rpm, nix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 生成校验和
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

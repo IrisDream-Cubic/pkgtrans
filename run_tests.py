@@ -597,9 +597,9 @@ if "search" in argv:
     check("setup pamac flatpak：只接管这两个",
           "pamac()" in block and "flatpak()" in block and "pacman()" not in block,
           f"{block!r}"[:300])
-    check("setup：提示已启用", "已为 pamac, flatpak 启用翻译" in err, f"{err!r}"[:200])
+    check("setup：回执点出接管列表", "已接管：pamac, flatpak" in err, f"{err!r}"[:200])
     code, out, err = run(["putes", "pamac"], **common)
-    check("putes pamac：取消接管", "已取消 pamac" in err and "pamac()" not in open(zshrc).read(),
+    check("putes pamac：取消接管", "已接管：flatpak" in err and "pamac()" not in open(zshrc).read(),
           f"{err!r}"[:200])
     code, out, err = run(["putesy", "flatpak"], **common)   # setup 反写的错拼也认
     check("putesy 别名可用（setup 反写）", code == 0 and "flatpak()" not in open(zshrc).read())

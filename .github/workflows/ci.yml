@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 自测 (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 跑自测（本地 mock API，不联网）
+        run: python3 run_tests.py
+
+  syntax:
+    name: 语法与打包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python 语法
+        run: python3 -m py_compile pkgtrans run_tests.py packaging/build-deb.py
+      - name: Shell 语法
+        run: |
+          sh -n install.sh
+          sh -n packaging/build-all.sh
+          sh -n packaging/build-source-tarball.sh
+          bash -n packaging/pkgtrans.bash-completion
+      - name: 构建 deb 并检查结构
+        run: python3 packaging/build-deb.py --outdir dist
+      - name: 装进系统跑一遍（dpkg 真校验）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ./dist/pkgtrans_*_all.deb
+          pkgtrans --version
+          pkgtrans help > /dev/null
+          test -f /usr/share/zsh/site-functions/_pkgtrans
+          test -f /usr/share/bash-completion/completions/pkgtrans
+
+  pkgbuild:
+    name: PKGBUILD 可构建
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装依赖
+        run: pacman -Syu --noconfirm --needed base-devel python
+      - name: 打包
+        run: |
+          sh packaging/build-source-tarball.sh 1.0 dist || true
+          tmp=$(mktemp -d)
+          cp packaging/PKGBUILD "$tmp/"
+          cp dist/pkgtrans-1.0.tar.gz "$tmp/" 2>/dev/null || \
+            git archive --format=tar.gz --prefix=pkgtrans-1.0/ -o "$tmp/pkgtrans-1.0.tar.gz" HEAD
+          chown -R nobody "$tmp"
+          cd "$tmp"
+          su nobody -s /bin/sh -c "makepkg -f --nodeps --noconfirm"
+
+  nix:
+    name: Nix 可构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - name: 构建并冒烟测试
+        run: |
+          nix build .# --print-build-logs
+          ./result/bin/pkgtrans --version
+          ./result/bin/pkgtrans help > /dev/null
