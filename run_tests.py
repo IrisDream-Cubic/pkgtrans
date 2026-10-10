@@ -183,7 +183,12 @@ def run(args, stdin=None, env_extra=None, cache_file=None, style="openai",
         "PSTRANS_API_KEY": "test-key",
         "PSTRANS_MODEL": "mock-model",
         "PSTRANS_API_STYLE": style,
-        "PSTRANS_CACHE_FILE": cache_file or "/nonexistent/pkgtrans-test-cache.json",
+        # 默认关缓存。以前靠「/nonexistent 写不进去」来隔离，但以 root 身份跑时
+        # （rpmbuild 的 %check、容器里）os.makedirs("/nonexistent") 会成功，
+        # 缓存就被跨用例复用了：前面成功的译文会被后面「期望失败」的用例读到，
+        # 于是一片假失败。只有测缓存的那一节才显式打开。
+        "PSTRANS_CACHE": "1" if cache_file else "0",
+        "PSTRANS_CACHE_FILE": cache_file or os.path.join(TMP, "unused-cache.json"),
         "no_proxy": "127.0.0.1,localhost",
         "NO_PROXY": "127.0.0.1,localhost",
     })
@@ -342,7 +347,7 @@ def main():
     # 必须屏蔽真实配置，否则这条用例会读到用户自己配好的 key 真的去调 API
     env["PSTRANS_CONFIG"] = "/nonexistent/pkgtrans-test-config"
     env["PSTRANS_KEYS_FILE"] = "/nonexistent/pkgtrans-test-keys.json"
-    env["PSTRANS_CACHE_FILE"] = "/nonexistent/pkgtrans-test-cache.json"
+    env["PSTRANS_CACHE"] = "0"
     env["no_proxy"] = "127.0.0.1"
     proc = subprocess.run([PKGTRANS, "--color", "always"], input=SAMPLE.encode(), env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
