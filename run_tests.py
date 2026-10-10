@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unicodedata
 
 PKGTRANS = os.path.expanduser("~/.local/bin/pkgtrans")
 RED = "\x1b[31m"
@@ -665,10 +666,11 @@ if "search" in argv:
     # ---------- 18. info / help ----------
     print("[18] info / help")
     code, out, err = run(["info"], **common)
-    lines = out.splitlines()
-    check("info：打出大字图案", "█" in out and "╔" in out, f"{out!r}"[:120])
-    check("info：图案 6 行等宽", len({len(l) for l in lines[:6]}) == 1,
-          str({len(l) for l in lines[:6]}))
+    check("info：打出大字图案", "_ __" in out and "|_|" in out, f"{out!r}"[:120])
+    check("info：图案是 5 行纯 ASCII",
+          len(out.splitlines()) >= 5
+          and all(ord(c) < 128 for l in out.splitlines()[:5] for c in l),
+          f"{out.splitlines()[:5]!r}"[:160])
     check("info：开发者/版本/开发/网址齐全",
           "Toru Momose" in out and "1.0" in out and "DeepSeek v4 Pro" in out
           and "https://iris-dream.top" in out, f"{out!r}"[:300])
@@ -678,6 +680,32 @@ if "search" in argv:
     code, out, err = run(["help"], **common)
     check("help：列出子命令", all(k in out for k in ("keyadd", "keylist", "setup", "putes",
                                                     "aim", "on / off")), f"{out!r}"[:200])
+
+    # ---------- 19. logo 的宽度安全性 ----------
+    print("[19] logo：纯 ASCII、宽度确定，放进 markdown 不会折行错位")
+    rows = mod.banner("PKGTRANS").splitlines()
+    check("logo：只含 ASCII 字符（宽度恒为 1）",
+          all(ord(c) < 128 for r in rows for c in r), f"{rows!r}"[:160])
+    check("logo：不含 East Asian Ambiguous 宽度字符（中文环境会按 2 列渲染）",
+          not any(unicodedata.east_asian_width(c) == "A" for r in rows for c in r),
+          str({c for r in rows for c in r if unicodedata.east_asian_width(c) == "A"}))
+    check("logo：不含全角字符",
+          not any(unicodedata.east_asian_width(c) in ("W", "F") for r in rows for c in r))
+    width = max(len(r) for r in rows)
+    check("logo：够窄（<= 56 列，旧版 68 且中文下按 136 渲染）", width <= 56, f"width={width}")
+    check("logo：行数固定 5 行", len(rows) == 5, str(len(rows)))
+
+    # README 里的图案必须和程序输出逐字节一致，否则改了一处忘了另一处
+    readme = open(os.path.join(os.path.dirname(PKGTRANS) and
+                               os.path.dirname(os.path.realpath(PKGTRANS)), "README.md"),
+                  encoding="utf-8").read()
+    blocks = re.findall(r"^```text\n(.*?)^```$", readme, re.S | re.M)
+    check("README：图案放在 ```text 代码块里（裸文本会被 markdown 重排）",
+          bool(blocks), f"找到 {len(blocks)} 个 text 代码块")
+    if blocks:
+        check("README：图案与程序输出逐字节一致",
+              blocks[0].rstrip("\n") == mod.banner("PKGTRANS"),
+              f"readme={blocks[0]!r}"[:160])
 
     print()
     print("=" * 62)
