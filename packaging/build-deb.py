@@ -43,6 +43,27 @@ def install_tree(root: str, version: str):
     put("usr/share/zsh/site-functions/_pkgtrans",
         os.path.join(ROOT, "packaging", "_pkgtrans"), 0o644)
 
+    # changelog.Debian.gz：少了它 lintian 会报 E: no-changelog。
+    # 日期写死，保证可重复构建。
+    dst = os.path.join(root, "usr/share/doc/pkgtrans/changelog.Debian.gz")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, "wb") as fh:
+        with gzip.GzipFile(fileobj=fh, mode="wb", mtime=EPOCH) as gz:
+            gz.write(changelog_text(version).encode("utf-8"))
+    os.chmod(dst, 0o644)
+
+
+def changelog_text(version: str) -> str:
+    return f"""pkgtrans ({version}-1) unstable; urgency=medium
+
+  * 首个版本：支持 pacman / yay / paru、pamac、flatpak 三种输出方言
+  * 多 API Key 管理与失败自动回退，可锁定为只用一个
+  * 目标语言可切换（简体 / 繁體 / 日本語 / 世界语 …）
+  * setup / putes 管理 shell 集成，on / off 全局开关
+
+ -- {MAINTAINER}  Sat, 10 Oct 2026 12:00:00 +0800
+"""
+
 
 def control_text(version: str, revision: str, installed_kb: int) -> str:
     return f"""\
@@ -138,7 +159,9 @@ def build_with_dpkg_deb(tree: str, control_dir: str, out_path: str) -> bool:
         return False
     shutil.move(control_dir, os.path.join(tree, "DEBIAN"))
     proc = subprocess.run(
-        [dpkg_deb, "--build", "--root-owner-group", tree, out_path],
+        # -Zgzip：新版 dpkg 默认用 zstd 压缩成员，而 Python 3.12 标准库解不了
+        # zstd，后面的结构校验会挂；gzip 的兼容性也最好。
+        [dpkg_deb, "--build", "-Zgzip", "--root-owner-group", tree, out_path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     if proc.returncode != 0:
@@ -147,7 +170,12 @@ def build_with_dpkg_deb(tree: str, control_dir: str, out_path: str) -> bool:
     return True
 
 
-def build_pure(tree: str, control_dir: str, out_path: str):
+def write_md5sums(tree: str, control_dir: str):
+    """生成 control 里的 md5sums。
+
+    两条构建路径都要有：dpkg-deb --build 自己**不会**算 md5sums
+    （那是 dh_md5sums 的活），不显式写就不会出现在包里。
+    """
     files = walk_files(tree)
     md5 = "".join(
         f"{hashlib.md5(open(os.path.join(tree, f), 'rb').read()).hexdigest()}  {f}\n"
@@ -156,6 +184,8 @@ def build_pure(tree: str, control_dir: str, out_path: str):
     with open(os.path.join(control_dir, "md5sums"), "w", encoding="utf-8") as fh:
         fh.write(md5)
 
+
+def build_pure(tree: str, control_dir: str, out_path: str):
     control_entries = sorted(os.listdir(control_dir))
     control_tar = make_tar_gz(control_dir, [(e, False) for e in control_entries])
     data_tar = make_tar_gz(tree, collect_entries(tree))
@@ -169,7 +199,11 @@ def build_pure(tree: str, control_dir: str, out_path: str):
 
 
 def verify_deb(path: str):
-    """重新解析一遍，确认 ar 结构、成员顺序和 control 必填字段都在。"""
+    """重新解析一遍，确认 ar 结构、成员顺序和 control 必填字段都在。
+
+    成员可能叫 control.tar.gz / .xz / .zst（取决于谁生成的），所以按前缀找，
+    不写死扩展名。
+    """
     with open(path, "rb") as fh:
         blob = fh.read()
     assert blob[:8] == b"!<arch>\n", "ar magic 不对"
@@ -184,15 +218,24 @@ def verify_deb(path: str):
         pos += 60 + size + (size % 2)
     assert names[0] == "debian-binary", f"第一个成员必须是 debian-binary，实际 {names[0]}"
     assert bodies["debian-binary"] == b"2.0\n", "debian-binary 内容不对"
-    assert "control.tar.gz" in names and "data.tar.gz" in names, names
 
-    with tarfile.open(fileobj=io.BytesIO(bodies["control.tar.gz"]), mode="r:gz") as tar:
+    control_member = next((n for n in names if n.startswith("control.tar")), None)
+    data_member = next((n for n in names if n.startswith("data.tar")), None)
+    assert control_member and data_member, f"缺 control/data 成员：{names}"
+
+    def open_member(member):
+        try:
+            return tarfile.open(fileobj=io.BytesIO(bodies[member]), mode="r:*")
+        except tarfile.TarError as exc:
+            raise AssertionError(f"{member} 解不开（压缩格式不支持？）：{exc}")
+
+    with open_member(control_member) as tar:
         control = tar.extractfile("./control").read().decode("utf-8")
-        assert "./md5sums" in tar.getnames(), "control.tar.gz 里缺 md5sums"
+        assert "./md5sums" in tar.getnames(), f"{control_member} 里缺 md5sums"
     for field in ("Package:", "Version:", "Architecture:", "Maintainer:", "Description:"):
         assert field in control, f"control 缺 {field}"
 
-    with tarfile.open(fileobj=io.BytesIO(bodies["data.tar.gz"]), mode="r:gz") as tar:
+    with open_member(data_member) as tar:
         data_names = tar.getnames()
         assert "./usr/bin/pkgtrans" in data_names, data_names
         assert tar.getmember("./usr/bin/pkgtrans").mode & 0o111, "pkgtrans 没有可执行位"
@@ -221,6 +264,7 @@ def main():
                     for b, _d, fs in os.walk(tree) for f in fs)
         with open(os.path.join(control_dir, "control"), "w", encoding="utf-8") as fh:
             fh.write(control_text(args.version, args.revision, (total + 1023) // 1024))
+        write_md5sums(tree, control_dir)
 
         if build_with_dpkg_deb(tree, control_dir, out_path):
             builder = "dpkg-deb"

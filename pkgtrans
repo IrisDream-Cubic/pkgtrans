@@ -1640,18 +1640,25 @@ def uninstall_shell(shell: str, quiet=False):
 
 
 def guess_shell() -> str:
-    """从 $SHELL 判断该写哪个 rc 文件。
+    """判断该往哪个 rc 文件写。
 
-    只支持 zsh / bash。其它 shell（fish、tcsh…）没有对应写法，
-    硬猜会写出一个永远不会被加载的文件，所以明确报错而不是瞎猜。
+    先看 $SHELL；它没设、或指向 zsh/bash 之外的 shell 时，退回 /etc/passwd 里
+    登记的**登录 shell**——CI runner 和容器里 $SHELL 经常是 /bin/sh，
+    只看它会把环境误判成「不支持」而拒绝写配置。
+    两个来源都不是 zsh/bash 才真的返回空。
     """
-    name = os.path.basename(os.environ.get("SHELL", "") or "")
-    if "zsh" in name:
-        return "zsh"
-    if "bash" in name:
-        return "bash"
-    if not name:
-        return "zsh"
+    candidates = [os.environ.get("SHELL", "")]
+    try:
+        import pwd
+        candidates.append(pwd.getpwuid(os.getuid()).pw_shell or "")
+    except (ImportError, KeyError, OSError):
+        pass
+    for path in candidates:
+        name = os.path.basename(path or "")
+        if "zsh" in name:
+            return "zsh"
+        if "bash" in name:
+            return "bash"
     return ""
 
 

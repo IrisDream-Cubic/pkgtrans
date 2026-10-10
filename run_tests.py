@@ -189,6 +189,9 @@ def run(args, stdin=None, env_extra=None, cache_file=None, style="openai",
         # 于是一片假失败。只有测缓存的那一节才显式打开。
         "PSTRANS_CACHE": "1" if cache_file else "0",
         "PSTRANS_CACHE_FILE": cache_file or os.path.join(TMP, "unused-cache.json"),
+        # 把 shell 钉死成 zsh。不钉的话，跑测试的机器是 bash（GitHub runner 就是），
+        # pkgtrans 会正确地往 ~/.bashrc 写，而测试却在读 ~/.zshrc —— 假失败。
+        "SHELL": "/usr/bin/zsh",
         "no_proxy": "127.0.0.1,localhost",
         "NO_PROXY": "127.0.0.1,localhost",
     })
@@ -642,9 +645,35 @@ if "search" in argv:
           f"{err!r}"[:200])
     code, out, err = run(["putesy", "flatpak"], **common)   # setup 反写的错拼也认
     check("putesy 别名可用（setup 反写）", code == 0 and "flatpak()" not in open(zshrc).read())
-    code, out, err = run(["setup", "pamac"], env_extra={"SHELL": "/usr/bin/fish"}, **common)
-    check("不支持的 shell：明确报错而不是瞎写 .zshrc",
-          code == 1 and "不支持" in err, f"code={code} {err!r}"[:200])
+    # guess_shell 的判定逻辑：进程内直接测，这样与跑测试的机器是什么 shell 无关
+    import pwd as _pwd
+    real_getpwuid = _pwd.getpwuid
+    saved_shell = os.environ.get("SHELL")
+
+    class _Rec:
+        def __init__(self, sh):
+            self.pw_shell = sh
+
+    try:
+        os.environ["SHELL"] = "/usr/bin/zsh"
+        _pwd.getpwuid = lambda uid: _Rec("/bin/sh")
+        check("guess_shell：$SHELL 优先", mod.guess_shell() == "zsh", mod.guess_shell())
+
+        os.environ["SHELL"] = "/bin/sh"
+        _pwd.getpwuid = lambda uid: _Rec("/usr/bin/zsh")
+        check("guess_shell：$SHELL 不认识时退回 /etc/passwd 的登录 shell",
+              mod.guess_shell() == "zsh", mod.guess_shell())
+
+        os.environ["SHELL"] = "/usr/bin/fish"
+        _pwd.getpwuid = lambda uid: _Rec("/usr/bin/fish")
+        check("guess_shell：两个来源都不是 zsh/bash 才返回空（不瞎写 rc 文件）",
+              mod.guess_shell() == "", repr(mod.guess_shell()))
+    finally:
+        _pwd.getpwuid = real_getpwuid
+        if saved_shell is None:
+            os.environ.pop("SHELL", None)
+        else:
+            os.environ["SHELL"] = saved_shell
 
     # 终端模拟器 ≠ shell：提示语要点出「窗口」和「shell」两层（提示走 stderr）
     code, out, err = run(["setup"], env_extra={"KITTY_WINDOW_ID": "1"}, **common)
