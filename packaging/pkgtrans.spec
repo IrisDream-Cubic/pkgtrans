@@ -52,5 +52,5 @@ install -Dpm0644 packaging/_pkgtrans \
 %license LICENSE
 
 %changelog
-* Fri Oct 10 2026 Toru Momose <iris@iris-dream.top> - 1.0-1
+* Sat Oct 10 2026 Toru Momose <iris@iris-dream.top> - 1.0-1
 - 首个版本：三种方言解析、多 API Key、目标语言、shell 集成

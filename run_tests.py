@@ -617,11 +617,15 @@ if "search" in argv:
     code, out, err = run(["setup"], **common)
     check("setup（无参）：打印接管状态表",
           "包管理器" in out and "已接管" in out and "pacman" in out, f"{out!r}"[:200])
+    # 先显式建一个基线：CI runner、rpmbuild/makepkg 环境里一个包管理器都没装，
+    # 靠 auto 探测会得到空集，putes all 就没东西可取消，后面的断言全崩。
+    run(["setup", "pacman"], **common)
     code, out, err = run(["putes", "all"], **common)
     check("putes all：配置写成 none（不会自动反弹）",
           "shell_targets = none" in open(cfg).read(), open(cfg).read()[-120:])
     zshrc = os.path.join(fake_home, ".zshrc")
-    check("putes all：块里不再定义任何函数", "() {" not in open(zshrc).read())
+    check("putes all：块里不再定义任何函数",
+          os.path.exists(zshrc) and "() {" not in open(zshrc).read())
     code, out, err = run(["setup", "pamac", "flatpak"], **common)
     block = open(zshrc).read()
     check("setup pamac flatpak：只接管这两个",
