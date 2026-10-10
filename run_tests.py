@@ -18,7 +18,36 @@ import tempfile
 import threading
 import unicodedata
 
-PKGTRANS = os.path.expanduser("~/.local/bin/pkgtrans")
+def _find_binary():
+    """按优先级找要测的 pkgtrans：源码树 > 本机安装 > 发行版安装位置 > PATH。
+
+    CI runner 和 makepkg/rpmbuild 的构建目录里都没有 ~/.local/bin，
+    把路径写死会让自测在那些环境里直接 FileNotFoundError 崩掉。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (
+        os.path.join(here, "pkgtrans"),              # 源码树 / 打包解压目录
+        os.path.expanduser("~/.local/bin/pkgtrans"),  # 本机 install.sh --user
+        "/usr/bin/pkgtrans",                          # Arch / deb / rpm 安装
+        "/usr/local/bin/pkgtrans",                    # make install
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return shutil.which("pkgtrans") or "pkgtrans"
+
+
+def _find_readme():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (os.path.dirname(os.path.realpath(PKGTRANS)), here,
+                 "/usr/share/doc/pkgtrans"):
+        cand = os.path.join(base, "README.md")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+PKGTRANS = _find_binary()
+README = _find_readme()
 RED = "\x1b[31m"
 YEL = "\x1b[33m"
 DIM = "\x1b[2m"
@@ -696,9 +725,7 @@ if "search" in argv:
     check("logo：行数固定 5 行", len(rows) == 5, str(len(rows)))
 
     # README 里的图案必须和程序输出逐字节一致，否则改了一处忘了另一处
-    readme = open(os.path.join(os.path.dirname(PKGTRANS) and
-                               os.path.dirname(os.path.realpath(PKGTRANS)), "README.md"),
-                  encoding="utf-8").read()
+    readme = open(README, encoding="utf-8").read() if README else ""
     blocks = re.findall(r"^```text\n(.*?)^```$", readme, re.S | re.M)
     check("README：图案放在 ```text 代码块里（裸文本会被 markdown 重排）",
           bool(blocks), f"找到 {len(blocks)} 个 text 代码块")
