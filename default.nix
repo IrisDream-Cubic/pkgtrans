@@ -11,10 +11,12 @@ stdenv.mkDerivation (finalAttrs: {
   inherit src;
 
   # 单文件 Python 脚本，没有构建步骤。
-  # python3 放 nativeBuildInputs 是为了让 fixupPhase 的 patchShebangs 把
-  # `#!/usr/bin/env python3` 改写成 nix store 里的路径——NixOS 上 PATH 里
-  # 默认没有 python3，不改写脚本根本跑不起来。改写后 shebang 本身就成了
-  # 运行时依赖，闭包里会带上解释器。
+  #
+  # python3 放 nativeBuildInputs 是为了让 fixupPhase 的 patchShebangs 能改写
+  # `#!/usr/bin/env python3`。但实测在沙箱里 patchShebangs 并不会动这个 shebang
+  # （构建期 PATH 里有 python3，所以 installCheck 还能过，等于骗过了自检），
+  # 装到 NixOS 上运行时 PATH 里没有 python3，直接 `env: 'python3': No such file`。
+  # 所以 installPhase 里显式把 shebang 写死成 store 路径，不依赖那个机制。
   nativeBuildInputs = [ python3 ];
 
   dontConfigure = true;
@@ -27,6 +29,9 @@ stdenv.mkDerivation (finalAttrs: {
 
     install -Dm755 pkgtrans $out/bin/pkgtrans
 
+    substituteInPlace $out/bin/pkgtrans \
+      --replace-fail '#!/usr/bin/env python3' '#!${python3}/bin/python3'
+
     install -Dm644 README.md $out/share/doc/pkgtrans/README.md
     install -Dm644 LICENSE   $out/share/licenses/pkgtrans/LICENSE
 
@@ -38,11 +43,14 @@ stdenv.mkDerivation (finalAttrs: {
     runHook postInstall
   '';
 
+  # 自检在**清空 PATH** 的情况下跑，才能真正验出 shebang 有没有写对。
+  # 正常情况下构建期 PATH 里带着 python3，会让坏掉的 shebang 蒙混过关。
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    $out/bin/pkgtrans help > /dev/null
-    $out/bin/pkgtrans --version > /dev/null
+    env -i "$out/bin/pkgtrans" --version > /dev/null
+    env -i "$out/bin/pkgtrans" help > /dev/null
+    env -i "$out/bin/pkgtrans" aim > /dev/null
     runHook postInstallCheck
   '';
 
