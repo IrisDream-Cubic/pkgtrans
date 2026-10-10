@@ -1,0 +1,2509 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""pkgtrans —— 为 pacman / yay / paru 等包管理器的搜索结果做 AI 翻译。
+
+翻译成功的描述文字显示为红色，翻译失败的显示为黄色。
+
+三种用法
+--------
+1. 透明拦截（推荐，由 `pkgtrans --install-shell` 写入 shell 配置）::
+
+       pacman -Ss neovim        # 搜索结果自动翻译
+       yay -Ss neovim
+       pacman -Syu              # 非搜索/信息类命令原样透传，行为完全不变
+
+2. 手动指定命令::
+
+       pkgtrans pacman -Ss neovim
+       pkgtrans --lang 繁體中文 yay -Ss neovim
+
+3. 管道过滤::
+
+       pacman -Ss neovim | pkgtrans
+
+配置（优先级：命令行 > 环境变量 > 配置文件 > 自动探测）
+--------------------------------------------------------
+配置文件： ``~/.config/pkgtrans/config``
+环境变量： ``PSTRANS_API_KEY`` / ``PSTRANS_API_BASE`` / ``PSTRANS_MODEL`` 等，
+          未设置时会自动探测 ``DEEPSEEK_API_KEY`` / ``OPENAI_API_KEY`` /
+          ``ANTHROPIC_API_KEY`` / ``OPENROUTER_API_KEY`` / ``OLLAMA_HOST`` 等。
+
+只依赖 Python 标准库。
+"""
+
+from __future__ import annotations
+
+import concurrent.futures as cf
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+
+__version__ = "1.0"
+DEVELOPER = "Toru Momose"
+DEVELOPER_URL = "https://iris-dream.top"
+BUILT_WITH = "DeepSeek v4 Pro"
+
+PROG = "pkgtrans"
+DEFAULT_CONFIG_PATH = "~/.config/pkgtrans/config"
+DEFAULT_CACHE_PATH = "~/.cache/pkgtrans/cache.json"
+DEFAULT_KEYS_PATH = "~/.config/pkgtrans/keys.json"
+STATE_PATH = "~/.config/pkgtrans/state.json"
+SHELL_BEGIN = "# >>> pkgtrans >>>"
+SHELL_END = "# <<< pkgtrans <<<"
+
+# 可以接管的包管理器
+KNOWN_MANAGERS = ["pacman", "yay", "paru", "pamac", "flatpak"]
+
+# 翻译成功 -> 红色；失败 -> 黄色
+ESC = "\033["
+RESET = ESC + "0m"
+GREEN = ESC + "32m"
+YELLOW = ESC + "33m"
+RED = ESC + "31m"
+DIM = ESC + "2m"
+
+# --------------------------------------------------------------------------
+# 默认配置
+# --------------------------------------------------------------------------
+
+DEFAULTS = {
+    # --- API ---
+    "api_style": "openai",      # openai | anthropic
+    "api_base": "",
+    "api_key": "",
+    "model": "",
+    "extra_body": "",           # 额外 JSON，合并进请求体（如 {"enable_thinking": false}）
+    "timeout": "30",
+    "retries": "2",
+    # --- 翻译 ---
+    "target_lang": "简体中文",
+    "chunk_size": "24",         # 每次请求翻译多少条描述
+    "concurrency": "4",         # 并发请求数
+    "max_items": "300",         # 单次最多翻译多少条描述（0 = 不限），防止意外烧 token
+    "translate_info": "1",      # 是否翻译 -Si / -Qi 的 Description 字段
+    "skip_cjk": "1",            # 已是中文的描述直接跳过 API
+    "bilingual": "0",           # 1 = 译文后附带灰色原文
+    # --- 显示 ---
+    "color_ok": "31",           # 红
+    "color_fail": "33",         # 黄
+    "color_dim": "2",
+    "force_color": "0",
+    # --- 缓存 ---
+    "cache": "1",
+    "cache_file": "",
+    # --- 状态（由 on/off、setup 子命令维护）---
+    "enabled": "1",             # 0 = 全局关闭，一切原样透传
+    "shell_targets": "",        # 要接管的包管理器，逗号分隔；空 = 自动（全部已安装的）
+    "keys_file": "",
+}
+
+# 环境变量名 -> 配置键
+ENV_MAP = {
+    "PSTRANS_API_STYLE": "api_style",
+    "PSTRANS_API_BASE": "api_base",
+    "PSTRANS_API_KEY": "api_key",
+    "PSTRANS_MODEL": "model",
+    "PSTRANS_LANG": "target_lang",
+    "PSTRANS_TIMEOUT": "timeout",
+    "PSTRANS_RETRIES": "retries",
+    "PSTRANS_CHUNK_SIZE": "chunk_size",
+    "PSTRANS_CONCURRENCY": "concurrency",
+    "PSTRANS_MAX_ITEMS": "max_items",
+    "PSTRANS_TRANSLATE_INFO": "translate_info",
+    "PSTRANS_BILINGUAL": "bilingual",
+    "PSTRANS_COLOR_OK": "color_ok",
+    "PSTRANS_COLOR_FAIL": "color_fail",
+    "PSTRANS_CACHE": "cache",
+    "PSTRANS_CACHE_FILE": "cache_file",
+    "PSTRANS_KEYS_FILE": "keys_file",
+    "PSTRANS_ENABLED": "enabled",
+    "PSTRANS_SHELL_TARGETS": "shell_targets",
+    "PSTRANS_FORCE_COLOR": "force_color",
+    "PSTRANS_EXTRA_BODY": "extra_body",
+}
+
+# 自动探测：(环境变量, base, model, style, 是否 key 可空)
+PROVIDERS = [
+    ("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1", "deepseek-chat", "openai", False),
+    ("OPENAI_API_KEY", "https://api.openai.com/v1", "gpt-4o-mini", "openai", False),
+    ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", "openai", False),
+    ("SILICONFLOW_API_KEY", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-7B-Instruct", "openai", False),
+    ("DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus", "openai", False),
+    ("MOONSHOT_API_KEY", "https://api.moonshot.cn/v1", "moonshot-v1-8k", "openai", False),
+    ("ZHIPUAI_API_KEY", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash", "openai", False),
+    ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "openai", False),
+    ("GROQ_API_KEY", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "openai", False),
+    ("ANTHROPIC_API_KEY", "https://api.anthropic.com", "claude-3-5-haiku-latest", "anthropic", False),
+    ("OLLAMA_HOST", "http://localhost:11434/v1", "qwen2.5:7b", "openai", True),
+]
+
+# `pkgtrans keyadd` 的服务商菜单：(显示名, style, base, 默认模型)
+KEY_PROVIDERS = [
+    ("DeepSeek", "openai", "https://api.deepseek.com/v1", "deepseek-chat"),
+    ("Claude", "anthropic", "https://api.anthropic.com", "claude-3-5-haiku-latest"),
+    ("OpenAI", "openai", "https://api.openai.com/v1", "gpt-4o-mini"),
+    ("通义千问", "openai", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+    ("Kimi", "openai", "https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+    ("智谱", "openai", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
+    ("硅基流动", "openai", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-7B-Instruct"),
+    ("OpenRouter", "openai", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+    ("Gemini", "openai", "https://generativelanguage.googleapis.com/v1beta/openai",
+     "gemini-2.0-flash"),
+    ("Groq", "openai", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    ("Ollama(本地)", "openai", "http://localhost:11434/v1", "qwen2.5:7b"),
+]
+
+# `pkgtrans aim` 的语言代码 -> 写入提示词的名称。也接受任意自由文本。
+LANGUAGES = {
+    "default": "简体中文",
+    "zh-hans": "简体中文", "zh-cn": "简体中文", "zh-sg": "简体中文",
+    "zh": "简体中文", "cn": "简体中文", "hans": "简体中文",
+    "zh-hant": "繁體中文", "zh-tw": "繁體中文", "zh-hk": "繁體中文",
+    "zh-mo": "繁體中文", "hant": "繁體中文", "tw": "繁體中文",
+    "ja-jpan": "日本語", "ja": "日本語", "jp": "日本語", "jpan": "日本語",
+    "ko-kore": "한국어", "ko": "한국어", "kore": "한국어",
+    "eo-latn": "世界语（Esperanto）", "eo": "世界语（Esperanto）", "latn": "世界语（Esperanto）",
+    "en-latn": "English", "en": "English",
+    "fr-latn": "Français", "fr": "Français",
+    "de-latn": "Deutsch", "de": "Deutsch",
+    "es-latn": "Español", "es": "Español",
+    "ru-cyrl": "Русский", "ru": "Русский",
+    "pt-latn": "Português", "pt": "Português",
+    "it-latn": "Italiano", "it": "Italiano",
+}
+
+# ANSI Shadow 字体，用于 `pkgtrans info` 的大字图案
+BANNER_FONT = {
+    "P": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔═══╝ ", "██║     ", "╚═╝     "],
+    "K": ["██╗  ██╗", "██║ ██╔╝", "█████╔╝ ", "██╔═██╗ ", "██║  ██╗", "╚═╝  ╚═╝"],
+    "G": [" ██████╗ ", "██╔════╝ ", "██║  ███╗", "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
+    "T": ["████████╗", "╚══██╔══╝", "   ██║   ", "   ██║   ", "   ██║   ", "   ╚═╝   "],
+    "R": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"],
+    "A": [" █████╗ ", "██╔══██╗", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
+    "N": ["███╗   ██╗", "████╗  ██║", "██╔██╗ ██║", "██║╚██╗██║", "██║ ╚████║", "╚═╝  ╚═══╝"],
+    "S": ["███████╗", "██╔════╝", "███████╗", "╚════██║", "███████║", "╚══════╝"],
+}
+
+
+def banner(text: str = "PKGTRANS") -> str:
+    rows = [""] * 6
+    for ch in text.upper():
+        glyph = BANNER_FONT.get(ch)
+        if glyph:
+            for i in range(6):
+                rows[i] += glyph[i]
+    return "\n".join(r.rstrip() for r in rows)
+
+
+# --------------------------------------------------------------------------
+# 小工具
+# --------------------------------------------------------------------------
+
+def eprint(*args, **kwargs):
+    kwargs.setdefault("file", sys.stderr)
+    kwargs.setdefault("flush", True)
+    print(*args, **kwargs)
+
+
+def write_stdout(text: str) -> None:
+    """始终以 UTF-8 写 stdout，绕开系统 locale（本机 LC_ALL 是坏的）。"""
+    try:
+        sys.stdout.buffer.write(text.encode("utf-8", "replace"))
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # 下游（head / grep -q）提前关闭，静默退出
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except Exception:
+            pass
+        raise SystemExit(0)
+
+
+def read_stdin() -> str:
+    data = sys.stdin.buffer.read()
+    return data.decode("utf-8", "replace")
+
+
+def expand(path: str) -> str:
+    return os.path.expanduser(os.path.expandvars(path))
+
+
+def as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y", "是")
+
+
+def as_int(value, fallback: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return fallback
+
+
+# --------------------------------------------------------------------------
+# 配置
+# --------------------------------------------------------------------------
+
+def parse_config_text(text: str) -> dict:
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip().lower()
+        val = val.strip()
+        # 去掉行尾注释（不在引号内）
+        if val[:1] in ("'", '"'):
+            quote = val[0]
+            end = val.find(quote, 1)
+            if end > 0:
+                val = val[1:end]
+        else:
+            val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
+        out[key] = val
+    return out
+
+
+def key_for_base(base: str) -> str:
+    """在环境变量里找与给定地址属于同一家服务商的密钥。
+
+    避免「配置里写 DeepSeek 地址、环境里只有 OPENAI_API_KEY」时把别家的
+    密钥发到错误的地址上去。
+    """
+    host = base.split("//", 1)[-1].split("/", 1)[0].lower()
+    for env, pbase, _model, _style, _opt in PROVIDERS:
+        phost = pbase.split("//", 1)[-1].split("/", 1)[0].lower()
+        if host == phost and os.environ.get(env):
+            return os.environ[env]
+    return ""
+
+
+def detect_provider() -> dict:
+    """从环境变量里自动挑一个可用的服务商配置。"""
+    if os.environ.get("OPENAI_BASE_URL"):
+        return {
+            "api_base": os.environ["OPENAI_BASE_URL"].rstrip("/"),
+            "api_key": os.environ.get("OPENAI_API_KEY", ""),
+            "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            "api_style": "openai",
+        }
+    for env, base, model, style, key_optional in PROVIDERS:
+        val = os.environ.get(env)
+        if env == "OLLAMA_HOST":
+            if not val:
+                continue
+            val = val.strip()
+            if not val.startswith("http"):
+                val = "http://" + val
+            return {
+                "api_base": val.rstrip("/").removesuffix("/v1") + "/v1",
+                "api_key": "ollama",
+                "model": model,
+                "api_style": style,
+            }
+        if val:
+            return {"api_base": base, "api_key": val, "model": model, "api_style": style}
+    return {}
+
+
+class Backend:
+    """一个可用的 API 端点：服务商 + 协议 + 地址 + 模型 + 密钥。"""
+
+    __slots__ = ("provider", "style", "base", "model", "key", "key_id")
+
+    def __init__(self, provider="", style="openai", base="", model="", key="", key_id=None):
+        self.provider = provider or "自定义"
+        self.style = "anthropic" if str(style).lower().startswith("anthropic") else "openai"
+        self.base = (base or "").strip().rstrip("/")
+        self.model = model or ""
+        self.key = key or ""
+        self.key_id = key_id
+
+    @property
+    def endpoint(self) -> str:
+        if not self.base:
+            return ""
+        if self.style == "anthropic":
+            return self.base if self.base.endswith("/messages") else self.base + "/v1/messages"
+        if self.base.endswith("/chat/completions"):
+            return self.base
+        return self.base + "/chat/completions"
+
+    def needs_key(self) -> bool:
+        if not self.base:
+            return False
+        host = self.base.split("//", 1)[-1].split("/", 1)[0].split(":")[0].lower()
+        return host not in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+    def problem(self) -> str:
+        """返回不能用的原因，能用则返回空串。"""
+        if not self.base:
+            return "未配置 API 地址"
+        if self.needs_key() and not self.key:
+            return "未配置 API 密钥"
+        return ""
+
+    def cache_id(self) -> str:
+        return f"{self.style}|{self.base}|{self.model}"
+
+    def label(self) -> str:
+        base = self.provider
+        if self.model and self.model not in base:
+            base = f"{base}({self.model})"
+        return base
+
+
+def provider_name_for(base: str) -> str:
+    host = (base or "").split("//", 1)[-1].split("/", 1)[0].lower()
+    for name, _style, pbase, _model in KEY_PROVIDERS:
+        if host == pbase.split("//", 1)[-1].split("/", 1)[0].lower():
+            return name
+    return host or "自定义"
+
+
+def mask_key(key: str) -> str:
+    """打码显示，保留前缀和末尾几位，方便分辨是哪一个。
+
+    前缀取到第二个 `-` 之前，这样 `sk-`(DeepSeek) 与 `sk-ant-`(Claude) 能区分开。
+    """
+    key = key or ""
+    if not key:
+        return "(空)"
+    if len(key) <= 10:
+        return key[:2] + "*****" + key[-2:]
+    prefix = key[:3]
+    first = key.find("-")
+    second = key.find("-", first + 1) if first >= 0 else -1
+    if 0 <= first < second <= 8:
+        prefix = key[: second + 1]
+    return f"{prefix}*****{key[-6:]}"
+
+
+def load_keys(path: str):
+    """读取密钥库，返回 (keys, preferred_id, locked)。不存在或损坏都当空处理。"""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return [], None, False
+    if not isinstance(data, dict):
+        return [], None, False
+    keys = [k for k in data.get("keys", []) if isinstance(k, dict) and k.get("key")]
+    return keys, data.get("preferred"), bool(data.get("locked"))
+
+
+def save_keys(path: str, keys, preferred, locked):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"version": 1, "preferred": preferred,
+                   "locked": bool(locked), "keys": keys},
+                  fh, ensure_ascii=False, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def next_key_id(keys) -> int:
+    return max((int(k.get("id", 0)) for k in keys), default=0) + 1
+
+
+def resolve_language(text: str):
+    """把 `zh-hant` 这类代码转成提示词里的语言名；未知的原样返回。"""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    return LANGUAGES.get(raw.lower(), raw)
+
+
+def update_config_value(path: str, key: str, value: str) -> bool:
+    """就地改写配置文件里的某一项（保留注释）。不存在则追加。返回是否写入成功。"""
+    line = f"{key} = {value}"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        text = ""
+    except OSError:
+        return False
+    pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.M)
+    if pattern.search(text):
+        text = pattern.sub(line, text, count=1)
+    else:
+        text = text.rstrip("\n") + f"\n\n# 由 `{PROG}` 子命令写入\n{line}\n"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+class Settings:
+    def __init__(self):
+        self.values = dict(DEFAULTS)
+        self.sources = {}
+        self.config_path = expand(DEFAULT_CONFIG_PATH)
+        self.errors = []
+
+    def set(self, key, value, source):
+        self.values[key] = value
+        self.sources[key] = source
+
+    def __getitem__(self, key):
+        return self.values.get(key, DEFAULTS.get(key, ""))
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    @property
+    def cache_path(self) -> str:
+        return expand(self["cache_file"] or DEFAULT_CACHE_PATH)
+
+    @property
+    def keys_path(self) -> str:
+        return expand(self["keys_file"] or DEFAULT_KEYS_PATH)
+
+    @property
+    def locked(self) -> bool:
+        return bool(load_keys(self.keys_path)[2])
+
+    def backends(self):
+        """按优先级返回后端列表。
+
+        优先级：显式环境变量 / 命令行  >  keys.json（keyadd 管理的密钥库）
+                >  配置文件里的 api_base  >  自动探测
+
+        也就是说：keys.json 一旦有内容，就不会被环境里那些「顺带存在」的
+        DEEPSEEK_API_KEY 之类抢走；但显式写 PSTRANS_API_BASE / --api-key
+        依然可以临时覆盖它（方便调试和一次性换后端）。
+        """
+        keys, preferred, locked = load_keys(self.keys_path)
+        explicit = any(self.sources.get(k) in ("env", "cli")
+                       for k in ("api_base", "api_key", "model"))
+        if self["api_base"] and (explicit or not keys):
+            return [Backend(provider_name_for(self["api_base"]), self["api_style"],
+                            self["api_base"], self["model"], self["api_key"])]
+        if keys:
+            first = next((k for k in keys if k.get("id") == preferred), keys[0])
+            ordered = [first] + ([] if locked else [k for k in keys if k is not first])
+            return [Backend(k.get("provider"), k.get("style"), k.get("base"),
+                            k.get("model"), k.get("key"), k.get("id")) for k in ordered]
+        if self["api_base"]:
+            return [Backend(provider_name_for(self["api_base"]), self["api_style"],
+                            self["api_base"], self["model"], self["api_key"])]
+        return []
+
+
+def load_settings(cli: dict) -> Settings:
+    st = Settings()
+
+    # 1) 配置文件
+    path = expand(cli.get("config") or os.environ.get("PSTRANS_CONFIG") or DEFAULT_CONFIG_PATH)
+    st.config_path = path
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for k, v in parse_config_text(fh.read()).items():
+                    if k in DEFAULTS:
+                        st.set(k, v, "config")
+        except OSError as exc:
+            st.errors.append(f"读取配置失败 {path}: {exc}")
+
+    # 2) 环境变量
+    for env, key in ENV_MAP.items():
+        if env in os.environ:
+            st.set(key, os.environ[env], "env")
+
+    # 3) 自动探测
+    #    - 没写 API 地址：整个服务商配置一起自动识别
+    #    - 写了地址但没写密钥：只找同一家服务商的密钥，不跨家混用
+    if not st["api_base"]:
+        auto = detect_provider()
+        for key, val in auto.items():
+            if not st[key]:
+                st.set(key, val, "auto")
+    elif not st["api_key"]:
+        matched = key_for_base(st["api_base"])
+        if matched:
+            st.set("api_key", matched, "auto")
+
+    # 4) 命令行
+    for key in ("api_base", "api_key", "model", "api_style", "target_lang"):
+        if cli.get(key):
+            st.set(key, cli[key], "cli")
+    if cli.get("color") == "always":
+        st.set("force_color", "1", "cli")
+    elif cli.get("color") == "never":
+        st.set("force_color", "-1", "cli")
+    if cli.get("no_cache"):
+        st.set("cache", "0", "cli")
+    if cli.get("no_info"):
+        st.set("translate_info", "0", "cli")
+    if cli.get("bilingual"):
+        st.set("bilingual", "1", "cli")
+    if cli.get("chunk"):
+        st.set("chunk_size", cli["chunk"], "cli")
+    if cli.get("jobs"):
+        st.set("concurrency", cli["jobs"], "cli")
+    for opt in ("max_items", "timeout", "retries"):
+        if cli.get(opt):
+            st.set(opt, cli[opt], "cli")
+
+    # 规范化
+    style = str(st["api_style"]).strip().lower()
+    st.set("api_style", "anthropic" if style.startswith("anthropic") else "openai", "normalize")
+    st.set("api_base", str(st["api_base"]).strip().rstrip("/"), "normalize")
+    if not st["model"]:
+        st.set("model", "deepseek-chat" if "deepseek" in st["api_base"] else "gpt-4o-mini", "default")
+    return st
+
+
+def usable_backends(st: Settings):
+    """能直接用的后端（地址、密钥都齐）。"""
+    return [b for b in st.backends() if not b.problem()]
+
+
+# --------------------------------------------------------------------------
+# 命令行参数
+# --------------------------------------------------------------------------
+
+KNOWN_OPTS = {
+    "--lang": ("target_lang", True),
+    "--model": ("model", True),
+    "--api-base": ("api_base", True),
+    "--api-key": ("api_key", True),
+    "--api-style": ("api_style", True),
+    "--color": ("color", True),
+    "--chunk": ("chunk", True),
+    "--jobs": ("jobs", True),
+    "--max-items": ("max_items", True),
+    "--timeout": ("timeout", True),
+    "--retries": ("retries", True),
+    "--config": ("config", True),
+    "--dialect": ("dialect", True),
+    "--no-cache": ("no_cache", False),
+    "--no-info": ("no_info", False),
+    "--bilingual": ("bilingual", False),
+    "--raw": ("raw", False),
+    "--quiet": ("quiet", False),
+    "--verbose": ("verbose", False),
+    "-v": ("version", False),
+    "--check": ("check", False),
+    "--show-config": ("show_config", False),
+    "--clear-cache": ("clear_cache", False),
+    "--shell-init": ("shell_init", True),
+    "--install-shell": ("install_shell", False),
+    "--uninstall-shell": ("uninstall_shell", False),
+    "--help": ("help", False),
+    "-h": ("help", False),
+    "--version": ("version", False),
+    "-V": ("version", False),
+}
+
+
+class UsageError(Exception):
+    pass
+
+
+def parse_args(argv):
+    """返回 (cli, command, cmdargs)。选项必须写在命令之前。"""
+    cli = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            i += 1
+            if i < len(argv):
+                return cli, argv[i], argv[i + 1:]
+            return cli, None, []
+        if arg.startswith("-") and arg != "-":
+            name, _, inline = arg.partition("=")
+            if name not in KNOWN_OPTS:
+                raise UsageError(f"未知选项：{arg}")
+            key, takes_value = KNOWN_OPTS[name]
+            if takes_value:
+                if inline:
+                    cli[key] = inline
+                else:
+                    i += 1
+                    if i >= len(argv):
+                        raise UsageError(f"{name} 需要一个参数")
+                    cli[key] = argv[i]
+            else:
+                cli[key] = True
+            i += 1
+            continue
+        return cli, arg, argv[i + 1:]
+    return cli, None, []
+
+
+HELP = f"""\
+{PROG} {__version__} —— 用 AI 翻译包管理器的搜索结果描述
+翻译成功显示红色，失败显示黄色。
+
+用法:
+  {PROG} <子命令> [参数]                管理设置
+  {PROG} [选项] <命令> [命令参数...]     运行命令并翻译其搜索结果
+  {PROG} [选项]                         从标准输入读取结果并翻译
+
+子命令:
+  help                显示本帮助
+  info, -v, --version 版本与开发者信息（大字图案）
+  check, status       自检：打印生效配置并真实调一次 API
+  aim [语言]          设置 / 查看目标语言（zh-hans zh-hant ja-jpan eo-latn …，
+                      不带参数=查看，default=简体中文）
+  keyadd              添加 API Key（交互式选服务商；也可
+                      `keyadd DeepSeek sk-xxx [模型]`）
+  keylist             列出所有 API Key 及当前优先项
+  keyprefer [编号]    设置 / 查看优先使用的 Key
+  keyremove <编号>    删除某个 Key
+  keylock             锁定：只用优先 Key，不自动切换
+  keyunlock           解锁：优先 Key 失败时自动切换备用
+  setup [包管理器…]   为包管理器启用翻译（不带参数=查看状态，all=全部）
+  putes [包管理器…]   取消（setup 反过来写；unsetup 同义）
+  on / off            全局开启 / 关闭
+  clear-cache         清空翻译缓存
+  show-config         显示最终生效的配置
+
+包装命令时的选项:
+  --lang <语言>       目标语言（默认 简体中文）
+  --model <模型>      LLM 模型名
+  --api-base <URL>    API 地址（OpenAI 兼容或 Anthropic）
+  --api-key <KEY>     API 密钥
+  --api-style <风格>  openai（默认）| anthropic
+  --color auto|always|never   着色策略（默认 auto）
+  --chunk <N>         每次请求翻译多少条描述（默认 24）
+  --jobs <N>          并发请求数（默认 4）
+  --max-items <N>     单次最多翻译多少条（默认 300，0 = 不限）
+  --timeout <秒>      单次请求超时（默认 30）
+  --retries <N>       失败重试次数（默认 2）
+  --dialect <格式>    auto | pacman | pamac | flatpak（仅管道模式需要）
+  --no-cache          本次不使用缓存
+  --no-info           不翻译 -Si / -Qi 的 Description 字段
+  --bilingual         译文后附上灰色原文
+  --raw               完全透传，不做任何翻译
+  --verbose           打印详细过程
+  --config <路径>     指定配置文件
+  -h, --help          显示本帮助
+
+示例:
+  {PROG} keyadd                     # 交互式添加第一个 API Key
+  {PROG} aim zh-hant                # 改成繁体中文
+  {PROG} setup pamac flatpak        # 让 pamac / flatpak 也自动翻译
+  {PROG} off                        # 暂时全部关掉
+  {PROG} check                      # 看看到底通不通
+
+  pacman -Ss neovim                 # 透明拦截（setup 生效时）
+  yay -Ss neovim
+  pamac search neovim
+  flatpak search neovim
+  pacman -Ss neovim | {PROG}         # 管道过滤
+"""
+
+
+# --------------------------------------------------------------------------
+# 输出解析
+# --------------------------------------------------------------------------
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+REPO = r"[A-Za-z0-9][A-Za-z0-9@._+-]*"
+PNAME = r"[A-Za-z0-9@._+][A-Za-z0-9@._+:-]*"
+# 形如 `extra/neovim 0.12.5-1` 或 `aur/foo 1.0-1 (+3 0.12) [2d] `
+HEADER_RE = re.compile(rf"^(?P<repo>{REPO})/(?P<name>{PNAME})\s+\S")
+# 形如 `Description     : Fork of Vim ...`（兼容中文字段名）
+INFO_RE = re.compile(r"^(?P<label>[^:\s][^:]*?)\s*:\s*(?P<value>\S.*)$")
+INFO_LABELS = {"description", "描述", "简介"}
+
+KIND_OTHER = "other"
+KIND_DESC = "desc"
+KIND_INFO = "info"
+
+# pamac search 每行末尾右对齐的仓库名
+PAMAC_REPOS = {"aur", "core", "extra", "multilib", "community", "testing",
+               "staging", "unstable", "local", "installed", "chaotic-aur",
+               "endeavouros", "cachyos", "rebornos"}
+# flatpak search 默认列顺序（--columns 可改）
+FLATPAK_DEFAULT_COLUMNS = ["name", "description", "application",
+                           "version", "branch", "remotes"]
+
+VERSIONISH_RE = re.compile(r"^[0-9rv]")
+
+
+def display_width(s: str) -> int:
+    """终端显示宽度：中日韩全角字符算 2 列。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
+
+
+def wrap_display(text: str, width: int):
+    """按显示宽度折行（width <= 0 表示不折）。英文尽量不切断单词。"""
+    if width <= 0 or display_width(text) <= width:
+        return [text]
+    lines, rest = [], text
+    while rest:
+        if display_width(rest) <= width:
+            lines.append(rest.rstrip())
+            break
+        used, cut = 0, 1
+        for i, ch in enumerate(rest):
+            w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+            if used + w > width:
+                break
+            used += w
+            cut = i + 1
+        piece = rest[:cut]
+        if " " in piece.rstrip() and not piece.endswith(" "):
+            sp = piece.rstrip().rfind(" ")
+            if sp >= len(piece) // 2:
+                piece, cut = piece[:sp], sp
+        lines.append(piece.rstrip())
+        rest = rest[cut:].lstrip()
+    return lines or [text]
+
+
+class Segment:
+    __slots__ = ("prefix", "text", "kind", "tkey", "suffix", "wrap_width",
+                 "raw_lines", "cont_prefix")
+
+    def __init__(self, prefix, text, kind, tkey=None,
+                 suffix="", wrap_width=0, raw_lines=None, cont_prefix=None):
+        self.prefix = prefix          # 缩进 / `Description   : ` 等前缀，原样保留
+        self.text = text              # 待翻译的文本（折行的已合并成一行）
+        self.kind = kind
+        self.tkey = tkey
+        self.suffix = suffix          # flatpak TSV 里描述列后面的制表符列
+        self.wrap_width = wrap_width  # >0 时把译文按此显示宽度折回多行
+        self.raw_lines = raw_lines    # 原文的原始分行，用于失败时逐字还原
+        # 折行后续行用的前缀：pamac info 要缩进到值那一列，而不是重复字段名
+        self.cont_prefix = prefix if cont_prefix is None else cont_prefix
+
+    def cont(self) -> str:
+        return self.cont_prefix
+
+
+def _is_pamac_header(plain: str) -> bool:
+    """pamac search 的包头：`名字  版本 …<右对齐>仓库`，不是 `repo/name` 形式。"""
+    if plain[:1].isspace():
+        return False
+    toks = plain.split()
+    if len(toks) < 3 or "/" in toks[0]:
+        return False
+    return toks[-1].lower() in PAMAC_REPOS or bool(VERSIONISH_RE.match(toks[1]))
+
+
+def _pamac_info_field(lines, i):
+    """匹配 `Description : 值` 并把缩进对齐的折行续行合并进来。"""
+    plain = ANSI_RE.sub("", lines[i])
+    m = INFO_RE.match(plain)
+    if not m or m.group("label").strip().lower() not in INFO_LABELS:
+        return None
+    parts = [m.group("value")]
+    k = i + 1
+    while k < len(lines):
+        nxt = ANSI_RE.sub("", lines[k])
+        if nxt.strip() and nxt[:1].isspace():
+            parts.append(nxt.strip())
+            k += 1
+        else:
+            break
+    width = max(display_width(p) for p in parts) if len(parts) > 1 else 0
+    prefix = plain[: m.start("value")]
+    return Segment(prefix, " ".join(parts), KIND_INFO, wrap_width=width,
+                   raw_lines=parts,
+                   cont_prefix=" " * display_width(prefix)), k
+
+
+def analyze_pacman(text: str, translate_info: bool):
+    """pacman / yay / paru 的 `-Ss` / `-Si` 输出。"""
+    segments = []
+    lines = text.split("\n")
+    expect_desc = False
+    for line in lines:
+        plain = ANSI_RE.sub("", line)
+        stripped = plain.strip()
+
+        if not stripped:
+            segments.append(Segment("", line, KIND_OTHER))
+            expect_desc = False
+            continue
+
+        # 缩进行：紧跟在包头行之后 -> 描述
+        if plain[:1].isspace():
+            indent = plain[: len(plain) - len(plain.lstrip())]
+            if expect_desc:
+                segments.append(Segment(indent, stripped, KIND_DESC))
+                continue
+            # 包信息块里的 Description 字段（少数情况会带缩进）
+            if translate_info:
+                m = INFO_RE.match(stripped)
+                if m and m.group("label").strip().lower() in INFO_LABELS:
+                    segments.append(
+                        Segment(indent + stripped[: m.start("value")], m.group("value"), KIND_INFO)
+                    )
+                    continue
+            segments.append(Segment("", line, KIND_OTHER))
+            continue
+
+        # 非缩进的 `Description : ...`（pacman -Si 实际输出即如此）
+        if translate_info:
+            m = INFO_RE.match(plain)
+            if m and m.group("label").strip().lower() in INFO_LABELS:
+                segments.append(Segment(plain[: m.start("value")], m.group("value"), KIND_INFO))
+                expect_desc = False
+                continue
+
+        if HEADER_RE.match(plain):
+            expect_desc = True
+        else:
+            expect_desc = False
+        segments.append(Segment("", line, KIND_OTHER))
+    return segments
+
+
+def analyze_pamac(text: str, translate_info: bool):
+    """pamac search / pamac info 输出。描述会折行，需要合并后再翻译、译完折回。"""
+    segments = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        plain = ANSI_RE.sub("", line)
+
+        if not plain.strip():
+            segments.append(Segment("", line, KIND_OTHER))
+            i += 1
+            continue
+
+        # 1) pamac info 的 Description 字段（值也折行）
+        if translate_info and not plain[:1].isspace():
+            got = _pamac_info_field(lines, i)
+            if got:
+                seg, i = got
+                segments.append(seg)
+                continue
+
+        # 2) pamac search 的包头行 + 紧随其后的折行描述
+        if _is_pamac_header(plain):
+            segments.append(Segment("", line, KIND_OTHER))
+            block, k = [], i + 1
+            while k < len(lines):
+                p = ANSI_RE.sub("", lines[k])
+                if p.strip() and p[:1].isspace():
+                    block.append(p)
+                    k += 1
+                else:
+                    break
+            if block:
+                indent = block[0][: len(block[0]) - len(block[0].lstrip())]
+                segments.append(Segment(indent, " ".join(b.strip() for b in block),
+                                        KIND_DESC,
+                                        wrap_width=max(display_width(b.strip()) for b in block),
+                                        raw_lines=[b.strip() for b in block]))
+            i = k
+            continue
+
+        segments.append(Segment("", line, KIND_OTHER))
+        i += 1
+    return segments
+
+
+def analyze_flatpak(text: str, columns=None):
+    """flatpak search 的 TSV 输出：描述是其中一列。"""
+    cols = [c.split(":", 1)[0].strip().lower() for c in (columns or FLATPAK_DEFAULT_COLUMNS)]
+    try:
+        idx = cols.index("description")
+    except ValueError:
+        idx = 1
+    segments = []
+    for line in text.split("\n"):
+        fields = line.split("\t")
+        if not line.strip() or "\t" not in line or len(fields) <= idx or not fields[idx].strip():
+            segments.append(Segment("", line, KIND_OTHER))
+            continue
+        prefix = "\t".join(fields[:idx]) + "\t" if idx else ""
+        suffix = "\t" + "\t".join(fields[idx + 1:]) if idx + 1 < len(fields) else ""
+        segments.append(Segment(prefix, fields[idx], KIND_DESC, suffix=suffix))
+    return segments
+
+
+PAMAC_SUBCOMMANDS = {"search", "info"}
+
+
+def detect_dialect(text: str) -> str:
+    """管道模式下猜测输出是哪家的。"""
+    lines = text.split("\n")[:300]
+    for line in lines:
+        if line.count("\t") >= 3:
+            return "flatpak"
+    for line in lines:
+        plain = ANSI_RE.sub("", line).rstrip()
+        if plain and not plain[:1].isspace():
+            toks = plain.split()
+            if len(toks) >= 3 and "/" not in toks[0] and toks[-1].lower() in PAMAC_REPOS:
+                return "pamac"
+    return "pacman"
+
+
+def analyze(text: str, translate_info: bool, dialect: str = "pacman", columns=None):
+    """把输出切成段落，标出哪些行是需要翻译的描述。"""
+    if dialect == "flatpak":
+        return analyze_flatpak(text, columns)
+    if dialect == "pamac":
+        return analyze_pamac(text, translate_info)
+    return analyze_pacman(text, translate_info)
+
+
+# --------------------------------------------------------------------------
+# 缓存
+# --------------------------------------------------------------------------
+
+class Cache:
+    MAX_ENTRIES = 20000
+
+    def __init__(self, path: str, enabled: bool):
+        self.path = path
+        self.enabled = enabled
+        self.entries = {}
+        self.dirty = False
+        self.hits = 0
+        if enabled:
+            self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+                self.entries = data["entries"]
+        except FileNotFoundError:
+            pass
+        except Exception:
+            self.entries = {}   # 缓存坏了就重建，不影响使用
+
+    def _key(self, engine: str, src: str) -> str:
+        return hashlib.sha256(f"{engine}\x00{src}".encode("utf-8")).hexdigest()
+
+    def get(self, engine: str, src: str):
+        if not self.enabled:
+            return None
+        item = self.entries.get(self._key(engine, src))
+        if not item:
+            return None
+        self.hits += 1
+        item["u"] = int(time.time())
+        self.dirty = True
+        return item.get("t")
+
+    def put(self, engine: str, src: str, dst: str):
+        if not self.enabled:
+            return
+        self.entries[self._key(engine, src)] = {"t": dst, "u": int(time.time())}
+        self.dirty = True
+
+    def save(self):
+        if not self.enabled or not self.dirty:
+            return
+        if len(self.entries) > self.MAX_ENTRIES:
+            keep = sorted(self.entries.items(), key=lambda kv: kv[1].get("u", 0), reverse=True)
+            self.entries = dict(keep[: self.MAX_ENTRIES])
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + f".tmp{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "entries": self.entries}, fh, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------
+# API 客户端
+# --------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+你是一个软件包描述翻译器。用户会给你一个 JSON 字符串数组，每个元素是一条软件包描述（多为英文）。
+请把每一条翻译成{lang}。
+
+要求：
+1. 严格保持数组长度和顺序一致，逐条对应。
+2. 软件名、库名、命令名、协议名、缩写、公司名等专有名词保留英文原样，不要音译。
+3. 译文要简洁自然，符合软件包管理器的描述风格；不要添加句号、引号等多余标点。
+4. 不要添加任何解释、注释、编号或前后缀。
+5. 如果某条本来就是{lang}，原样返回。
+6. 如果某条无法翻译，原样返回。
+
+只输出一个 JSON 字符串数组，例如：["译文一","译文二"]
+不要输出 markdown 代码块，不要输出别的任何内容。"""
+
+
+class ApiError(Exception):
+    def __init__(self, message, status=None, retryable=False):
+        super().__init__(message)
+        self.status = status
+        self.retryable = retryable
+
+
+class TranslationFailed(Exception):
+    """hard=True 表示这类错误重试多少次都没用（如 401/403），不要再二分试探。"""
+
+    def __init__(self, message, hard=False):
+        super().__init__(message)
+        self.hard = hard
+
+
+def _http_post_json(url, payload, headers, timeout):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": f"{PROG}/{__version__}",
+            **headers,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:400]
+        except Exception:
+            pass
+        retryable = exc.code in (408, 409, 425, 429) or exc.code >= 500
+        raise ApiError(f"HTTP {exc.code} {exc.reason} {detail}".strip(), exc.code, retryable)
+    except urllib.error.URLError as exc:
+        raise ApiError(f"网络错误：{exc.reason}", None, True)
+    except TimeoutError:
+        raise ApiError("请求超时", None, True)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise ApiError(f"响应不是合法 JSON：{raw[:200]}")
+
+
+def extract_json_array(text: str):
+    """从模型回复里抠出 JSON（容忍 ``` 围栏和前后废话）。"""
+    s = (text or "").strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.S)
+    if fence:
+        s = fence.group(1).strip()
+    try:
+        return json.loads(s)
+    except ValueError:
+        pass
+    for opener, closer in (("[", "]"), ("{", "}")):
+        start = s.find(opener)
+        if start < 0:
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            ch = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(s[start: i + 1])
+                    except ValueError:
+                        break
+    raise ValueError("响应中找不到 JSON")
+
+
+def normalize_items(parsed, expected: int):
+    """把模型的返回统一成恰好 expected 个字符串（缺失记为 None）。"""
+    items = parsed
+    if isinstance(items, dict):
+        for key in ("translations", "result", "results", "data", "items", "descriptions"):
+            if isinstance(items.get(key), list):
+                items = items[key]
+                break
+        else:
+            for val in items.values():
+                if isinstance(val, list):
+                    items = val
+                    break
+    if isinstance(items, dict):
+        # {"1": "译文", "2": "译文"} 这种
+        try:
+            items = [items[k] for k in sorted(items, key=lambda x: int(x))]
+        except Exception:
+            pass
+    if not isinstance(items, list):
+        raise ValueError("响应不是数组")
+
+    out = []
+    for item in items[:expected]:
+        if isinstance(item, str):
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            for key in ("translation", "text", "zh", "译文", "content"):
+                if isinstance(item.get(key), str):
+                    out.append(item[key].strip())
+                    break
+            else:
+                out.append(None)
+        elif item is None:
+            out.append(None)
+        else:
+            out.append(str(item).strip())
+    out += [None] * (expected - len(out))
+    return out
+
+
+def call_openai(backend: Backend, batch, lang, extra, timeout):
+    headers = {}
+    if backend.key:
+        headers["Authorization"] = "Bearer " + backend.key
+    payload = {
+        "model": backend.model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT.format(lang=lang)},
+            {"role": "user", "content": json.dumps(batch, ensure_ascii=False)},
+        ],
+    }
+    payload.update(extra)
+    data = _http_post_json(backend.endpoint, payload, headers, timeout)
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise ApiError(f"响应结构异常：{json.dumps(data, ensure_ascii=False)[:200]}")
+    if isinstance(content, list):   # 少数服务商返回分段内容
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return content or ""
+
+
+def call_anthropic(backend: Backend, batch, lang, extra, timeout):
+    headers = {"anthropic-version": "2023-06-01"}
+    if backend.key:
+        headers["x-api-key"] = backend.key
+    payload = {
+        "model": backend.model,
+        "max_tokens": 8192,
+        "temperature": 0,
+        "system": SYSTEM_PROMPT.format(lang=lang),
+        "messages": [{"role": "user", "content": json.dumps(batch, ensure_ascii=False)}],
+    }
+    payload.update(extra)
+    data = _http_post_json(backend.endpoint, payload, headers, timeout)
+    blocks = data.get("content")
+    if not isinstance(blocks, list):
+        raise ApiError(f"响应结构异常：{json.dumps(data, ensure_ascii=False)[:200]}")
+    return "".join(b.get("text", "") for b in blocks if isinstance(b, dict))
+
+
+def extra_body(st) -> dict:
+    raw = str(st["extra_body"] or "").strip()
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, dict) else {}
+    except ValueError:
+        return {}
+
+
+def request_translations(backend: Backend, batch, lang, extra, retries, timeout):
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            if backend.style == "anthropic":
+                raw = call_anthropic(backend, batch, lang, extra, timeout)
+            else:
+                raw = call_openai(backend, batch, lang, extra, timeout)
+            return normalize_items(extract_json_array(raw), len(batch))
+        except ApiError as exc:
+            last = exc
+            if not exc.retryable or attempt >= retries:
+                break
+            time.sleep(0.8 * (2 ** attempt))
+        except ValueError as exc:
+            last = exc
+            break
+    hard = isinstance(last, ApiError) and not last.retryable
+    raise TranslationFailed(str(last), hard=hard)
+
+
+# --------------------------------------------------------------------------
+# 翻译引擎
+# --------------------------------------------------------------------------
+
+CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def looks_chinese(text: str) -> bool:
+    cjk = len(CJK_RE.findall(text))
+    words = len(re.findall(r"[A-Za-z]{2,}", text))
+    if cjk < 2:
+        return False
+    return words <= max(1, cjk // 4)
+
+
+class Translator:
+    def __init__(self, st: Settings, verbose=False):
+        self.st = st
+        self.verbose = verbose
+        self.lang = st["target_lang"]
+        self.extra = extra_body(st)
+        self.retries = as_int(st["retries"], 2)
+        self.backends = st.backends()
+        self.bi = 0                      # 当前用第几个后端
+        self.block = threading.Lock()
+        first = self.backends[0] if self.backends else None
+        # 缓存按「协议|地址|模型|目标语言」做键，与用哪个密钥无关
+        self.engine = f"{first.cache_id() if first else 'none'}|{self.lang}"
+        self.cache = Cache(st.cache_path, as_bool(st["cache"]))
+        self.timeout = max(5, as_int(st["timeout"], 30))
+        self.chunk = max(1, as_int(st["chunk_size"], 24))
+        self.jobs = max(1, min(16, as_int(st["concurrency"], 4)))
+        self.translated = 0
+        self.failed = 0
+        self.reused = 0
+        self.skipped = 0
+        self.requests = 0
+        self.switches = 0
+        self.error_streak = 0
+        self.fatal = ""       # 所有后端都失败后熔断，避免把 token 烧在注定失败的请求上
+        self.first_error = ""
+
+    def current(self):
+        if self.fatal:
+            return None
+        with self.block:
+            return self.backends[self.bi] if self.bi < len(self.backends) else None
+
+    def _advance(self):
+        """切到下一个备用后端；没有更多则返回 False。"""
+        with self.block:
+            if self.bi + 1 >= len(self.backends):
+                return False
+            self.bi += 1
+            self.switches += 1
+            return True
+
+    def run(self, texts):
+        """texts: 待翻译文本列表。返回等长的 [译文 or None]。"""
+        results = [None] * len(texts)
+        pending = {}      # 文本 -> [下标...]
+        for idx, text in enumerate(texts):
+            if not text.strip():
+                results[idx] = text
+            elif as_bool(self.st["skip_cjk"]) and looks_chinese(text):
+                results[idx] = text      # 无需翻译：原样当作译文，渲染为红色
+                self.skipped += 1
+            else:
+                pending.setdefault(text, []).append(idx)
+
+        # 缓存
+        misses = []
+        for text, idxs in pending.items():
+            hit = self.cache.get(self.engine, text)
+            if hit:
+                for idx in idxs:
+                    results[idx] = hit
+                self.reused += len(idxs)
+            else:
+                misses.append(text)
+
+        if misses:
+            translated = self._translate_all(misses)
+            for text, value in translated.items():
+                for idx in pending[text]:
+                    results[idx] = value
+
+        # 统计
+        for idx, text in enumerate(texts):
+            if not text.strip():
+                continue
+            if results[idx]:
+                self.translated += 1
+            else:
+                self.failed += 1
+        self.cache.save()
+        return results
+
+    def _translate_all(self, misses) -> dict:
+        chunks = [misses[i: i + self.chunk] for i in range(0, len(misses), self.chunk)]
+        out = {}
+        with cf.ThreadPoolExecutor(max_workers=self.jobs) as pool:
+            futures = {pool.submit(self._translate_chunk, chunk): chunk for chunk in chunks}
+            try:
+                for fut in cf.as_completed(futures):
+                    chunk = futures[fut]
+                    try:
+                        values = fut.result()
+                    except Exception as exc:          # 兜底，正常不会走到
+                        self._note_error(str(exc))
+                        values = [None] * len(chunk)
+                    for text, value in zip(chunk, values):
+                        if value:
+                            out[text] = value
+                            self.cache.put(self.engine, text, value)
+            except KeyboardInterrupt:
+                for fut in futures:
+                    fut.cancel()
+                raise
+        return out
+
+    def _translate_chunk(self, chunk, depth=0):
+        """整块失败就二分重试，直到单条；密钥不行就换下一个备用后端。
+
+        单条仍失败则判为翻译失败（黄色）。所有后端都失败后熔断，
+        否则一个写错的密钥会让工具发出上百个注定失败的请求。
+        """
+        if not chunk:
+            return []
+        backend = self.current()
+        if backend is None:
+            return [None] * len(chunk)
+
+        problem = backend.problem()
+        if problem:
+            self._note_error(f"{backend.label()}：{problem}")
+            if self._advance():
+                return self._translate_chunk(chunk, depth + 1)
+            return [None] * len(chunk)
+
+        try:
+            self.requests += 1
+            values = request_translations(backend, chunk, self.lang, self.extra,
+                                          self.retries, self.timeout)
+            if len(chunk) > 1:
+                missing = [i for i, v in enumerate(values) if not v]
+                if len(missing) == len(chunk):
+                    raise TranslationFailed("整块返回为空")
+                if missing:      # 模型漏译了几条，只把这些单独补一次
+                    sub = self._translate_chunk([chunk[i] for i in missing], depth + 1)
+                    for i, val in zip(missing, sub):
+                        values[i] = val
+            self.error_streak = 0
+            return values
+        except Exception as exc:
+            self._note_error(f"{backend.label()}：{exc}")
+            hard = getattr(exc, "hard", False)
+            self.error_streak += 1
+            # 硬错误（401/403）或连续失败 -> 换下一个密钥再试
+            if hard or self.error_streak >= 3:
+                if self._advance():
+                    self.error_streak = 0
+                    if self.verbose:
+                        eprint(f"{PROG}: → 改用备用密钥 {self.current().label()}")
+                    return self._translate_chunk(chunk, depth + 1)
+                if not self.fatal:
+                    self.fatal = str(exc)
+                return [None] * len(chunk)
+            if len(chunk) == 1 or self.error_streak >= 4:
+                if not self.fatal:
+                    self.fatal = str(exc)
+                return [None] * len(chunk)
+            mid = len(chunk) // 2
+            return (self._translate_chunk(chunk[:mid], depth + 1)
+                    + self._translate_chunk(chunk[mid:], depth + 1))
+
+    def _note_error(self, message):
+        if not self.first_error:
+            self.first_error = message
+        if self.verbose:
+            eprint(f"{PROG}: {message}")
+
+
+# --------------------------------------------------------------------------
+# 渲染
+# --------------------------------------------------------------------------
+
+def colorize(text, code, enabled):
+    if not enabled or not code or str(code) == "0":
+        return text
+    return f"{ESC}{code}m{text}{RESET}"
+
+
+def render(segments, results, st, color_enabled, max_items):
+    """按段渲染最终输出。results 与 segments 里可翻译的段等长。"""
+    limit = float("inf") if max_items <= 0 else max_items
+    c_ok = st["color_ok"]
+    c_fail = st["color_fail"]
+    c_dim = st["color_dim"]
+    bilingual = as_bool(st["bilingual"])
+    out = []
+    index = 0
+    for seg in segments:
+        if seg.kind == KIND_OTHER:
+            out.append(seg.text)
+            continue
+        if index >= limit:                       # 超出上限：不改动
+            for raw in (seg.raw_lines or [seg.text]):
+                out.append(seg.prefix + raw + seg.suffix)
+            index += 1
+            continue
+        value = results[index]
+        index += 1
+        if value:
+            lines = wrap_display(value, seg.wrap_width)
+            first = colorize(lines[0], c_ok, color_enabled)
+            if bilingual and value.strip() != seg.text.strip():
+                first += colorize(f"  ({seg.text})", c_dim, color_enabled)
+            out.append(seg.prefix + first + seg.suffix)
+            for extra in lines[1:]:
+                out.append(seg.cont() + colorize(extra, c_ok, color_enabled))
+        else:
+            # 失败：按原文原始分行逐行还原，避免重新折行导致漂移
+            raw = seg.raw_lines or wrap_display(seg.text, seg.wrap_width)
+            out.append(seg.prefix + colorize(raw[0], c_fail, color_enabled) + seg.suffix)
+            for extra in raw[1:]:
+                out.append(seg.cont() + colorize(extra, c_fail, color_enabled))
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# shell 集成
+# --------------------------------------------------------------------------
+
+def installed_managers():
+    return [m for m in KNOWN_MANAGERS if shutil.which(m)]
+
+
+def shell_targets(st: Settings):
+    """要接管的包管理器列表。
+
+    配置为空 / auto = 自动（所有已安装的）；显式的 none = 一个都不接管。
+    不然 `putes all` 会被当成「未配置」而自动变回全接管。
+    """
+    raw = str(st["shell_targets"] or "").strip()
+    if not raw or raw == "auto":
+        return installed_managers()
+    if raw == "none":
+        return []
+    seen, out = set(), []
+    for item in raw.replace(" ", ",").split(","):
+        name = item.strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def shell_snippet(shell: str, targets) -> str:
+    targets = list(targets)
+    lines = [
+        SHELL_BEGIN,
+        "# 让这些命令的搜索结果自动经 AI 翻译：",
+        f"#   {', '.join(targets) if targets else '(空，用 pkgtrans setup 添加)'}",
+        "# 其他子命令（-Syu、install、run…）原样透传，行为完全不变。",
+        f"# 由 `{PROG} setup` 写入，删除本段或用 `{PROG} putes` 即可卸载。",
+        'if [ -x "$HOME/.local/bin/pkgtrans" ]; then',
+    ]
+    for name in targets:
+        body = f'{name}() {{ command "$HOME/.local/bin/pkgtrans" {name} "$@"; }}'
+        if shell == "bash":
+            lines.append(f"  if command -v {name} >/dev/null 2>&1; then {body} fi")
+        else:
+            lines.append(f"  if (( $+commands[{name}] )); then {body} fi")
+    lines += ["fi", SHELL_END]
+    return "\n".join(lines) + "\n"
+
+
+def strip_block(text: str) -> str:
+    pattern = re.compile(
+        re.escape(SHELL_BEGIN) + r".*?" + re.escape(SHELL_END) + r"\n?",
+        re.S,
+    )
+    return pattern.sub("", text)
+
+
+def rc_path_for(shell: str) -> str:
+    return expand("~/.zshrc" if shell == "zsh" else "~/.bashrc")
+
+
+def install_shell(shell: str, targets, quiet=False):
+    rc = rc_path_for(shell)
+    old = ""
+    if os.path.exists(rc):
+        with open(rc, "r", encoding="utf-8", errors="replace") as fh:
+            old = fh.read()
+        backup = f"{rc}.pkgtrans.bak.{time.strftime('%Y%m%d%H%M%S')}"
+        shutil.copy2(rc, backup)
+        if not quiet:
+            eprint(f"  已备份 {rc} -> {backup}")
+    new = strip_block(old).rstrip("\n") + "\n\n" + shell_snippet(shell, targets).rstrip("\n") + "\n"
+    if new.startswith("\n\n"):
+        new = new.lstrip("\n")
+    try:
+        os.makedirs(os.path.dirname(rc), exist_ok=True)
+        with open(rc, "w", encoding="utf-8") as fh:
+            fh.write(new)
+    except OSError as exc:
+        fail(f"写入 {rc} 失败：{exc}")
+        return False
+    return True
+
+
+def uninstall_shell(shell: str, quiet=False):
+    rc = rc_path_for(shell)
+    if not os.path.exists(rc):
+        eprint(f"  ! {rc} 不存在")
+        return 1
+    with open(rc, "r", encoding="utf-8", errors="replace") as fh:
+        old = fh.read()
+    if SHELL_BEGIN not in old:
+        if not quiet:
+            eprint(f"  ! {rc} 中没有 pkgtrans 集成")
+        return 0
+    backup = f"{rc}.pkgtrans.bak.{time.strftime('%Y%m%d%H%M%S')}"
+    shutil.copy2(rc, backup)
+    try:
+        with open(rc, "w", encoding="utf-8") as fh:
+            fh.write(strip_block(old))
+    except OSError as exc:
+        eprint(f"  ✗ 写入 {rc} 失败：{exc}")
+        return 1
+    if not quiet:
+        eprint(f"  已从 {rc} 移除（备份：{backup}）")
+    return 0
+
+
+def guess_shell() -> str:
+    return "bash" if "bash" in os.environ.get("SHELL", "") else "zsh"
+
+
+# --------------------------------------------------------------------------
+# 输出提示
+# --------------------------------------------------------------------------
+
+def ok(message):
+    eprint(f"  {GREEN}✓{RESET} {message}")
+
+
+def warn(message):
+    eprint(f"  {YELLOW}!{RESET} {message}")
+
+
+def fail(message):
+    eprint(f"  {RED}✗{RESET} {message}")
+
+
+def note(message):
+    eprint(f"    {message}")
+
+
+# --------------------------------------------------------------------------
+# 命令分类：只翻译搜索/信息类调用，其他一律透传
+# --------------------------------------------------------------------------
+
+MODE_LONG = {
+    "--sync": "S", "--query": "Q", "--database": "D", "--remove": "R",
+    "--upgrade": "U", "--files": "F", "--deptest": "T",
+    "--search": "s", "--info": "i", "--list": "l", "--groups": "g",
+    "--owns": "o", "--file": "p", "--print": "p",
+}
+OPS = set("SQDRUFT")
+
+
+def _classify_pacman(argv):
+    """pacman / yay / paru 的旗标式调用。"""
+    ops = set()
+    subs = set()
+    for arg in argv:
+        if arg == "--":
+            break
+        if arg.startswith("--"):
+            name = arg.split("=", 1)[0]
+            code = MODE_LONG.get(name)
+            if code:
+                (ops if code in OPS else subs).add(code)
+        elif arg.startswith("-") and len(arg) > 1:
+            for ch in arg[1:]:
+                if ch in OPS:
+                    ops.add(ch)
+                elif ch in ("b", "r"):
+                    break          # 该短选项带参数，后面的字符属于参数值
+                else:
+                    subs.add(ch)
+    if not ops & {"S", "Q", "F"}:
+        return "other"
+    if "s" in subs:
+        return "search"
+    if "i" in subs:
+        return "info"
+    return "other"
+
+
+def _first_action(argv):
+    """子命令式 CLI 的第一个非选项参数（即 action）。"""
+    for arg in argv:
+        if arg == "--":
+            continue
+        if not arg.startswith("-"):
+            return arg
+    return ""
+
+
+def flatpak_columns(argv):
+    """从 `--columns=a,b,c` 里取出列顺序，用于定位 description 在第几列。"""
+    for i, arg in enumerate(argv):
+        if arg.startswith("--columns="):
+            raw = arg.split("=", 1)[1]
+        elif arg == "--columns" and i + 1 < len(argv):
+            raw = argv[i + 1]
+        else:
+            continue
+        cols = [c.strip() for c in raw.split(",") if c.strip()]
+        return cols or None
+    return None
+
+
+def classify(command, argv):
+    """返回 (mode, dialect)。
+
+    mode:    search | info | other
+    dialect: pacman | pamac | flatpak
+
+    只在搜索/信息类调用上翻译，其余一律原样透传：
+      pacman -Ss / -Qs / -Fs   -> search      (pacman)
+      pacman -Si / -Qi         -> info        (pacman)
+      pamac search / pamac info -> search/info (pamac，子命令语法)
+      flatpak search            -> search      (flatpak，TSV 输出)
+      pacman -Syu / -R / -Slq / pamac install / flatpak run -> other
+    注意 -R 的 -s 是 --recursive 不是搜索，所以要求同时出现 S/Q/F。
+    """
+    base = os.path.basename(command or "")
+    if base == "flatpak":
+        if "search" != _first_action(argv):
+            return "other", "flatpak"
+        # --json 输出的是机器可读格式，别去动它
+        if any(a in ("-j", "--json") for a in argv):
+            return "other", "flatpak"
+        return "search", "flatpak"
+    if base in ("pamac", "pamac-cli"):
+        action = _first_action(argv)
+        if action in PAMAC_SUBCOMMANDS:
+            return ("search" if action == "search" else "info"), "pamac"
+        return "other", "pamac"
+    return _classify_pacman(argv), "pacman"
+
+
+def resolve_binary(name: str):
+    """找到真正的可执行文件，避免踩到同名 shell 函数/包装脚本导致递归。"""
+    me = os.path.realpath(sys.argv[0])
+    for candidate in (f"/usr/bin/{name}", f"/bin/{name}", f"/usr/local/bin/{name}"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    path = shutil.which(name)
+    if path and os.path.realpath(path) != me:
+        return path
+    return None
+
+
+# --------------------------------------------------------------------------
+# 主流程
+# --------------------------------------------------------------------------
+
+def collect_texts(segments, translate_info, max_items):
+    """从段落里取出需要翻译的文本（保持出现顺序）。"""
+    texts = []
+    limit = float("inf") if max_items <= 0 else max_items
+    index = 0
+    for seg in segments:
+        if seg.kind == KIND_OTHER:
+            continue
+        if index >= limit:
+            index += 1
+            continue
+        index += 1
+        if seg.kind == KIND_DESC or (seg.kind == KIND_INFO and translate_info):
+            texts.append(seg.text)
+    return texts, index
+
+
+def process(text: str, st: Settings, opts, dialect: str = "pacman", columns=None) -> str:
+    """翻译一段包管理器输出，返回最终文本。"""
+    if not text.strip():
+        return text
+
+    translate_info = as_bool(st["translate_info"])
+    segments = analyze(text, translate_info, dialect, columns)
+    max_items = as_int(st["max_items"], 300)
+    texts, total = collect_texts(segments, translate_info, max_items)
+
+    color_enabled = want_color(st)
+    if not texts:
+        return render(segments, [], st, color_enabled, max_items)
+
+    usable = usable_backends(st)
+    have_api = bool(usable)
+
+    if opts.get("verbose"):
+        chain = " → ".join(b.label() for b in st.backends()) or "(未配置)"
+        eprint(f"{PROG}: 后端={chain} 待译={len(texts)} 条")
+
+    translator = Translator(st, verbose=bool(opts.get("verbose")))
+    started = time.time()
+    truncated = total > max_items > 0
+    if have_api:
+        if sys.stderr.isatty() and not opts.get("quiet"):
+            hint = f"，其余 {total - max_items} 条超出上限未翻译" if truncated else ""
+            eprint(f"\r{PROG}: 正在翻译 {len(texts)} 条描述…{hint}")
+        results = translator.run(texts)
+        if sys.stderr.isatty() and not opts.get("quiet"):
+            eprint("\r" + " " * 60 + "\r", end="")
+    else:
+        results = [None] * len(texts)
+        translator.failed = len(texts)
+
+    rendered = render(segments, results, st, color_enabled, max_items)
+
+    if not opts.get("quiet"):
+        elapsed = time.time() - started
+        bits = []
+        if have_api:
+            bits.append(f"{translator.translated} 条已翻译(红)")
+            if translator.reused:
+                bits.append(f"其中 {translator.reused} 条命中缓存")
+            if translator.skipped:
+                bits.append(f"{translator.skipped} 条本就中文")
+        if translator.failed:
+            bits.append(f"{translator.failed} 条失败(黄)")
+        if truncated:
+            bits.append(f"{total - max_items} 条超出上限未处理")
+        if translator.switches:
+            bits.append(f"切换过 {translator.switches} 次备用密钥")
+        if bits:
+            line = f"{PROG}: " + "，".join(bits)
+            if have_api:
+                line += f"，耗时 {elapsed:.1f}s"
+            eprint(line)
+        if not have_api:
+            for line in api_setup_hints(st):
+                eprint(f"{PROG}: {line}")
+            eprint(f"{PROG}: 详见 `{PROG} --help`；用 `{PROG} --check` 自检。")
+        if have_api and translator.failed and translator.first_error:
+            eprint(f"{PROG}: 失败原因：{translator.first_error[:200]}")
+    return rendered
+
+
+def color_status(st: Settings):
+    """返回 (是否上色, 原因)。原因用于 --check 诊断「为什么没颜色」。"""
+    force = str(st["force_color"])
+    if force == "1":
+        return True, "--color always / force_color = 1"
+    if force == "-1":
+        return False, "--color never"
+    if os.environ.get("NO_COLOR"):
+        return False, ("环境变量 NO_COLOR 已设置 —— 红/黄标记会被完全抑制。"
+                       "要恢复：unset NO_COLOR，或在配置文件里写 force_color = 1")
+    if os.environ.get("CLICOLOR_FORCE") not in (None, "", "0"):
+        return True, "CLICOLOR_FORCE 已设置"
+    if sys.stdout.isatty():
+        return True, "输出是终端"
+    return False, ("输出是管道/文件（正常行为）。终端里直接运行、"
+                   "或加 --color always 即可上色")
+
+
+def want_color(st: Settings) -> bool:
+    return color_status(st)[0]
+
+
+BASE_EXAMPLES = [
+    ("DeepSeek", "https://api.deepseek.com/v1"),
+    ("OpenAI", "https://api.openai.com/v1"),
+    ("硅基流动", "https://api.siliconflow.cn/v1"),
+    ("通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    ("Anthropic", "https://api.anthropic.com"),
+    ("OpenRouter", "https://openrouter.ai/api/v1"),
+]
+
+
+def key_shape_hint(key: str) -> str:
+    """仅凭密钥格式给一条线索，不保证准确，也绝不据此自动选择服务商。"""
+    k = (key or "").strip()
+    if k.startswith("sk-ant-"):
+        return "Anthropic"
+    if k.startswith("sk-or-"):
+        return "OpenRouter"
+    if re.fullmatch(r"sk-[0-9a-fA-F]{32}", k):
+        return "DeepSeek 或 通义千问（两家密钥格式相同，无法区分）"
+    if re.fullmatch(r"sk-[A-Za-z0-9_\-]{40,}", k):
+        return "OpenAI / 硅基流动 / Kimi 等"
+    return ""
+
+
+def api_setup_hints(st: Settings):
+    """返回一组可直接照抄的配置指引。"""
+    lines = []
+    if st["api_key"] and not st["api_base"]:
+        lines.append("已读到密钥，但光有密钥无法确定服务商，还需要一个 API 地址。")
+        shape = key_shape_hint(st["api_key"])
+        if shape:
+            lines.append(f"（密钥格式看起来像：{shape}）")
+        lines.append("补地址的方式，任选一种：")
+        for name, base in BASE_EXAMPLES[:3]:
+            lines.append(f"    export PSTRANS_API_BASE={base}    # {name}")
+        lines.append(f"    或编辑 {st.config_path}，取消注释对应服务商那一组")
+        lines.append("更省事的写法：改用带服务商名字的变量，地址会被自动识别——")
+        lines.append("    unset PSTRANS_API_KEY")
+        lines.append("    export DEEPSEEK_API_KEY=sk-xxxx     # 换成你实际用的那家")
+        lines.append(f"最省事：跑 `{PROG} keyadd`，密钥、地址、模型一次配好并记住。")
+    elif not st["api_key"]:
+        lines.append("未配置 API 密钥，描述会以黄色原样显示。")
+        lines.append(f"推荐：跑 `{PROG} keyadd` 交互式添加（密钥、地址、模型一次配好）。")
+        lines.append("或手动用环境变量（带服务商名字的变量，地址自动识别）：")
+        lines.append("    export DEEPSEEK_API_KEY=sk-xxxx     # 或 OPENAI_API_KEY / ANTHROPIC_API_KEY …")
+        lines.append("通用写法（密钥和地址两个都要给）：")
+        lines.append("    export PSTRANS_API_KEY=sk-xxxx")
+        lines.append("    export PSTRANS_API_BASE=https://api.deepseek.com/v1")
+        lines.append(f"或编辑 {st.config_path}，取消注释其中一组")
+    return lines
+
+
+def do_check(st: Settings, opts) -> int:
+    keys, preferred, locked = load_keys(st.keys_path)
+    print(f"{PROG} {__version__}   （{DEVELOPER} · {DEVELOPER_URL}）")
+    print(f"配置文件      : {st.config_path}"
+          f"{'' if os.path.exists(st.config_path) else '  (不存在)'}")
+    print(f"密钥库        : {st.keys_path}"
+          f"{'' if keys else '  (空，回落到配置文件/环境变量)'}"
+          f"{'  [已锁定]' if locked else ''}")
+    print(f"运行状态      : {'开启' if as_bool(st['enabled']) else '已关闭（pkgtrans on 恢复）'}")
+    print(f"目标语言      : {st['target_lang']}")
+    print(f"接管命令      : {', '.join(shell_targets(st)) or '(无)'}")
+    print(f"后端链路      :")
+    for backend in st.backends():
+        mark = "→" if preferred and backend.key_id == preferred else " "
+        problem = backend.problem()
+        state = "就绪" if not problem else problem
+        print(f"  {mark} [{backend.key_id if backend.key_id else '-'}] "
+              f"{backend.label():<28} {mask_key(backend.key):<22} {state}")
+        print(f"      {backend.endpoint or '(无地址)'}")
+    print(f"  {'cache_file':<12}= {st.cache_path}")
+    c_on, c_why = color_status(st)
+    print(f"  {'颜色标记':<12}= {'开启' if c_on else '关闭'}（{c_why}）")
+    rc_path = expand("~/.zshrc")
+    try:
+        with open(rc_path, "r", encoding="utf-8", errors="replace") as fh:
+            rc_text = fh.read()
+    except OSError:
+        rc_text = ""
+    if SHELL_BEGIN in rc_text:
+        print(f"  {'shell 集成':<12}= 已写入 {rc_path}（终端里 `type pacman` 应显示 shell function）")
+    else:
+        print(f"  {'shell 集成':<12}= 未安装，跑 `{PROG} setup`；或手动用 `{PROG} <命令>`")
+
+    usable = usable_backends(st)
+    if not usable:
+        print("\n结论：现在还不能翻译，描述会以黄色原样显示。")
+        for line in api_setup_hints(st):
+            print(line)
+        return 1
+
+    print("\n发起一次测试请求…")
+    sample = ["A version manager for neovim", "Lightweight terminal file manager"]
+    backend = usable[0]
+    t0 = time.time()
+    try:
+        values = request_translations(backend, sample, st["target_lang"], extra_body(st),
+                                      as_int(st["retries"], 2), max(5, as_int(st["timeout"], 30)))
+    except Exception as exc:
+        print(f"失败（{backend.label()}）：{exc}")
+        return 1
+    print(f"成功（{backend.label()}，{time.time() - t0:.2f}s）：")
+    for src, dst in zip(sample, values):
+        print(f"  {src}\n    -> {dst if dst else '(空)'}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 子命令
+# --------------------------------------------------------------------------
+
+def simple_color_ok() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("CLICOLOR_FORCE") not in (None, "", "0"):
+        return True
+    return sys.stdout.isatty()
+
+
+def cmd_info(_st=None):
+    """`pkgtrans info` / `-v` / `--version`：大字图案 + 开发者信息。"""
+    art = banner("PKGTRANS")
+    if simple_color_ok():
+        art = f"{RED}{art}{RESET}"
+    print(art)
+    print()
+    print(f"· 开发者：{DEVELOPER}")
+    print(f"· 版本：  {__version__}")
+    print(f"· 开发：  {BUILT_WITH}")
+    print(f"More about Developer: {DEVELOPER_URL}")
+    return 0
+
+
+def do_show_config(st: Settings) -> int:
+    for key in sorted(DEFAULTS):
+        val = st[key]
+        if key in ("api_key",) and val:
+            val = mask_key(str(val))
+        print(f"{key:<16}= {val}   [{st.sources.get(key, 'default')}]")
+    return 0
+
+
+def do_clear_cache(st: Settings) -> int:
+    path = st.cache_path
+    try:
+        os.remove(path)
+        ok(f"已删除缓存 {path}")
+    except FileNotFoundError:
+        warn(f"缓存不存在 {path}")
+    except OSError as exc:
+        fail(f"删除失败 {path}：{exc}")
+        return 1
+    return 0
+
+
+# ------------------------------------------------------------------ aim
+
+def cmd_aim(st: Settings, args) -> int:
+    if not args:
+        print(f"当前目标语言：{st['target_lang']}")
+        note(f"可用代码：default(简体中文) zh-hant ja-jpan ko-kore eo-latn en-latn …")
+        note(f"也可以直接写语言名，如 `{PROG} aim 文言文`")
+        return 0
+    raw = " ".join(args).strip()
+    if not raw:
+        fail("目标语言不能为空")
+        return 2
+    lang = resolve_language(raw)
+    if not update_config_value(st.config_path, "target_lang", lang):
+        fail(f"写入配置失败：{st.config_path}")
+        return 1
+    suffix = f"（代码 {raw}）" if raw.lower() != lang.lower() else ""
+    ok(f"目标语言已设为 {lang}{suffix}")
+    note(f"写入 {st.config_path}，立即生效（缓存按语言分开，不会串味）")
+    return 0
+
+
+# ------------------------------------------------------------------ key
+
+def _print_keys(keys, preferred, locked):
+    if not keys:
+        print("  （密钥库为空，当前使用配置文件 / 环境变量里的服务商）")
+        return
+    width = max(len(str(k.get("provider", ""))) for k in keys)
+    for k in keys:
+        mark = "*" if k.get("id") == preferred else " "
+        print(f" {mark}{k.get('id'):>2} -> {str(k.get('provider','')):<{width}}"
+              f"  |  {mask_key(k.get('key',''))}")
+    first = next((k for k in keys if k.get("id") == preferred), keys[0])
+    tail = "，已锁定（只用这一个）" if locked else ""
+    print()
+    print(f"     共 {len(keys)} 个 API key，当前优先："
+          f"{first.get('provider')} {mask_key(first.get('key',''))}{tail}")
+    if not locked and len(keys) > 1:
+        print(f"     优先密钥失败时会自动切换到其它 {len(keys)-1} 个")
+
+
+def cmd_keylist(st: Settings) -> int:
+    keys, preferred, locked = load_keys(st.keys_path)
+    _print_keys(keys, preferred, locked)
+    if keys:
+        note(f"密钥库：{st.keys_path}")
+    return 0
+
+
+def _pick_provider_interactive():
+    print("请选择服务商：")
+    for i, (name, _style, _base, model) in enumerate(KEY_PROVIDERS, 1):
+        print(f"  {i:>2}) {name:<12} {model}")
+    print(f"   0) 其它（自己填地址和模型）")
+    try:
+        raw = input("选择 [1]: ").strip() or "1"
+    except EOFError:
+        raw = "1"
+    if not raw.isdigit():
+        return None
+    n = int(raw)
+    if n == 0:
+        return ("自定义", "openai", "", "")
+    if 1 <= n <= len(KEY_PROVIDERS):
+        return KEY_PROVIDERS[n - 1]
+    return None
+
+
+def cmd_keyadd(st: Settings, args) -> int:
+    opts, positional, i = {}, [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--"):
+            name, _, inline = arg.partition("=")
+            field = name[2:].replace("-", "_")
+            if field not in ("provider", "base", "model", "style", "key"):
+                fail(f"未知选项 {arg}")
+                return 2
+            if inline:
+                opts[field] = inline
+            else:
+                i += 1
+                if i >= len(args):
+                    fail(f"{name} 需要一个参数")
+                    return 2
+                opts[field] = args[i]
+        else:
+            positional.append(arg)
+        i += 1
+
+    provider = opts.get("provider") or (positional[0] if positional else "")
+    base = opts.get("base", "")
+    model = opts.get("model", "")
+    style = opts.get("style", "")
+    key = opts.get("key") or (positional[1] if len(positional) > 1 else "")
+
+    preset = None
+    if not provider:
+        if not sys.stdin.isatty():
+            fail("非交互环境下请用：pkgtrans keyadd <服务商> <密钥> [模型]")
+            note("或 pkgtrans keyadd --provider DeepSeek --key sk-xxx --model deepseek-chat")
+            return 2
+        preset = _pick_provider_interactive()
+        if preset is None:
+            fail("无效的选择")
+            return 2
+        provider, style, base, model = preset
+    else:
+        for item in KEY_PROVIDERS:
+            if item[0].lower() == provider.lower():
+                preset = item
+                break
+        if preset:
+            provider, style, base, model = preset[0], style or preset[1], base or preset[2], \
+                model or preset[3]
+
+    if not key:
+        if not sys.stdin.isatty():
+            line = sys.stdin.readline().strip()
+            if line:
+                key = line
+        if not key:
+            try:
+                import getpass
+                key = getpass.getpass("API Key（输入不回显）: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                fail("已取消")
+                return 1
+    if not key:
+        fail("密钥不能为空")
+        return 2
+
+    if preset and not base:
+        base = preset[2]
+    if not base:
+        try:
+            base = input("API 地址（如 https://api.deepseek.com/v1）: ").strip()
+        except EOFError:
+            base = ""
+    if not base:
+        fail("API 地址不能为空")
+        return 2
+    if not model:
+        default_model = preset[3] if preset else ""
+        if sys.stdin.isatty():
+            try:
+                model = input(f"模型（回车用 {default_model or '默认'}）: ").strip()
+            except EOFError:
+                model = ""
+        model = model or default_model
+    if not style:
+        style = preset[1] if preset else ("anthropic" if "anthropic" in base else "openai")
+
+    keys, preferred, locked = load_keys(st.keys_path)
+    backend = Backend(provider, style, base, model, key)
+    if backend.needs_key() and not key:
+        fail("该地址需要密钥")
+        return 2
+    entry = {"id": next_key_id(keys), "provider": provider, "style": backend.style,
+             "base": backend.base, "model": model, "key": key}
+    keys.append(entry)
+    if preferred is None:
+        preferred = entry["id"]
+    save_keys(st.keys_path, keys, preferred, locked)
+    ok(f"已添加 {provider} 密钥 {mask_key(key)}（编号 {entry['id']}）")
+    note(f"地址：{backend.base}")
+    note(f"模型：{model or '(服务商默认)'}")
+    note(f"密钥库：{st.keys_path}（权限 600）")
+    print()
+    _print_keys(keys, preferred, locked)
+    return 0
+
+
+def _find_key(keys, raw):
+    if raw is None or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    if text.isdigit():
+        return next((k for k in keys if k.get("id") == int(text)), None)
+    return next((k for k in keys if str(k.get("provider", "")).lower() == text.lower()), None)
+
+
+def cmd_keyremove(st: Settings, args) -> int:
+    keys, preferred, locked = load_keys(st.keys_path)
+    if not keys:
+        fail("密钥库是空的")
+        return 1
+    if not args:
+        _print_keys(keys, preferred, locked)
+        fail(f"请指定要删除的编号，如 `{PROG} keyremove 2`")
+        return 2
+    target = _find_key(keys, args[0])
+    if target is None:
+        fail(f"找不到编号 / 服务商：{args[0]}")
+        return 2
+    keys = [k for k in keys if k is not target]
+    if preferred == target.get("id"):
+        preferred = keys[0]["id"] if keys else None
+    save_keys(st.keys_path, keys, preferred, locked)
+    ok(f"已删除 [{target.get('id')}] {target.get('provider')} "
+       f"{mask_key(target.get('key', ''))}")
+    if keys:
+        nxt = next((k for k in keys if k.get("id") == preferred), keys[0])
+        note(f"当前优先：{nxt.get('provider')} {mask_key(nxt.get('key',''))}")
+    else:
+        warn("密钥库已空，将回落到配置文件 / 环境变量里的服务商")
+    return 0
+
+
+def cmd_keyprefer(st: Settings, args) -> int:
+    keys, preferred, locked = load_keys(st.keys_path)
+    if not keys:
+        fail("密钥库是空的，先跑 `pkgtrans keyadd`")
+        return 1
+    if not args:
+        first = next((k for k in keys if k.get("id") == preferred), keys[0])
+        print(f"当前优先：{first.get('provider')} {mask_key(first.get('key',''))}"
+              f"（编号 {first.get('id')}）")
+        if locked:
+            note("已锁定：只会用它，不会切换到备用密钥")
+        else:
+            note(f"未锁定：失败时会依次尝试其余 {len(keys)-1} 个备用密钥")
+        return 0
+    target = _find_key(keys, args[0])
+    if target is None:
+        fail(f"找不到编号 / 服务商：{args[0]}")
+        return 2
+    save_keys(st.keys_path, keys, target.get("id"), locked)
+    ok(f"已把 {target.get('provider')} {mask_key(target.get('key',''))} "
+       f"设为优先密钥（编号 {target.get('id')}）")
+    return 0
+
+
+def cmd_keylock(st: Settings, lock: bool) -> int:
+    keys, preferred, locked = load_keys(st.keys_path)
+    if not keys:
+        fail("密钥库是空的，先跑 `pkgtrans keyadd`")
+        return 1
+    save_keys(st.keys_path, keys, preferred, lock)
+    first = next((k for k in keys if k.get("id") == preferred), keys[0])
+    if lock:
+        ok(f"已锁定：只使用 {first.get('provider')} {mask_key(first.get('key',''))}")
+        note(f"`{PROG} keyunlock` 可恢复「失败时自动切换备用密钥」")
+    else:
+        ok(f"已解锁：优先 {first.get('provider')} {mask_key(first.get('key',''))}"
+           f"，失败时自动切换备用密钥")
+    return 0
+
+
+# ------------------------------------------------------------------ setup
+
+def _pad(text, width):
+    """按显示宽度补空格（中文算 2 列）。"""
+    return text + " " * max(0, width - display_width(text))
+
+
+def _print_manager_table(st: Settings):
+    active = set(shell_targets(st))
+    print(f"  {_pad('包管理器', 12)}{_pad('已安装', 8)}{_pad('已接管', 8)}")
+    for name in KNOWN_MANAGERS:
+        installed = shutil.which(name) is not None
+        print(f"  {_pad(name, 12)}{_pad('✓' if installed else '-', 8)}"
+              f"{'✓' if name in active else '-'}")
+    note(f"用法：`{PROG} setup <名字…>` 接管，`{PROG} putes <名字…>` 取消，all 表示全部")
+    note(f"改完需要新开终端或 `source {rc_path_for(guess_shell())}` 才生效")
+
+
+def _write_targets(st: Settings, targets) -> bool:
+    # 先落 shell 配置，成功了再写状态，避免失败时留下半改的状态
+    shell = guess_shell()
+    value = ",".join(targets) if targets else "none"
+    if not install_shell(shell, targets, quiet=True):
+        return False
+    if not update_config_value(st.config_path, "shell_targets", value):
+        fail(f"写入配置失败：{st.config_path}")
+        return False
+    st.set("shell_targets", value, "cli")
+    ok(f"已更新 {rc_path_for(shell)} 的 shell 集成（当前接管：{', '.join(targets) or '无'}）")
+    return True
+
+
+def _resolve_manager_args(args):
+    names = []
+    for a in args:
+        for part in a.replace(" ", ",").split(","):
+            part = part.strip()
+            if part and part not in names:
+                names.append(part)
+    if "all" in names:
+        return installed_managers()
+    return names
+
+
+def cmd_setup(st: Settings, args) -> int:
+    if not args:
+        _print_manager_table(st)
+        return 0
+    names = _resolve_manager_args(args)
+    unknown = [n for n in names if n not in KNOWN_MANAGERS]
+    if unknown:
+        warn(f"这些不在已知列表里，仍会照写：{', '.join(unknown)}")
+    current = shell_targets(st)
+    added = [n for n in names if n not in current]
+    merged = current + added
+    if not _write_targets(st, merged):
+        return 1
+    if added:
+        ok(f"已为 {', '.join(added)} 启用翻译")
+    else:
+        warn("这些包管理器本来就已接管")
+    for n in added:
+        if not shutil.which(n):
+            warn(f"{n} 没有安装，装上后会自动生效")
+    return 0
+
+
+def cmd_putes(st: Settings, args) -> int:
+    if not args:
+        _print_manager_table(st)
+        return 0
+    names = _resolve_manager_args(args)
+    if "all" in [a for a in args]:
+        names = shell_targets(st)
+    current = shell_targets(st)
+    removed = [n for n in names if n in current]
+    merged = [n for n in current if n not in removed]
+    if not _write_targets(st, merged):
+        return 1
+    if removed:
+        ok(f"已取消 {', '.join(removed)} 的翻译")
+    else:
+        warn("这些本来就没接管")
+    return 0
+
+
+# ------------------------------------------------------------------ on/off
+
+def cmd_onoff(st: Settings, enable: bool) -> int:
+    if not update_config_value(st.config_path, "enabled", "1" if enable else "0"):
+        fail(f"写入配置失败：{st.config_path}")
+        return 1
+    if enable:
+        ok("已开启 pkgtrans，搜索时会自动翻译")
+        usable = usable_backends(st)
+        if usable:
+            note(f"后端：{usable[0].label()}")
+        else:
+            warn("还没有可用的 API 密钥，跑 `pkgtrans keyadd` 或 `pkgtrans check` 看看")
+    else:
+        ok("已关闭 pkgtrans，所有命令原样透传")
+        note(f"`{PROG} on` 随时恢复")
+    return 0
+
+
+# ------------------------------------------------------------------ 分发
+
+SUBCOMMANDS = {
+    "help", "info", "version", "check", "status",
+    "aim", "keylist", "keyadd", "keyremove", "keyprefer", "keylock", "keyunlock",
+    "setup", "putes", "putesy", "unsetup",
+    "on", "off", "clear-cache", "show-config",
+    "install-shell", "uninstall-shell",
+}
+
+
+def dispatch_subcommand(name: str, rest):
+    st = load_settings({})
+    for err in st.errors:
+        eprint(f"{PROG}: {err}")
+
+    if name == "help":
+        write_stdout(HELP)
+        return 0
+    if name in ("info", "version"):
+        return cmd_info(st)
+    if name in ("check", "status"):
+        return do_check(st, {})
+    if name == "aim":
+        return cmd_aim(st, rest)
+    if name == "keylist":
+        return cmd_keylist(st)
+    if name == "keyadd":
+        return cmd_keyadd(st, rest)
+    if name == "keyremove":
+        return cmd_keyremove(st, rest)
+    if name == "keyprefer":
+        return cmd_keyprefer(st, rest)
+    if name == "keylock":
+        return cmd_keylock(st, True)
+    if name == "keyunlock":
+        return cmd_keylock(st, False)
+    if name == "setup":
+        return cmd_setup(st, rest)
+    if name in ("putes", "putesy", "unsetup"):
+        return cmd_putes(st, rest)
+    if name in ("on", "off"):
+        return cmd_onoff(st, name == "on")
+    if name == "clear-cache":
+        return do_clear_cache(st)
+    if name == "show-config":
+        return do_show_config(st)
+    if name == "install-shell":
+        return 0 if install_shell(guess_shell(), shell_targets(st)) else 1
+    if name == "uninstall-shell":
+        return uninstall_shell(guess_shell())
+    fail(f"未知子命令 {name}")
+    return 2
+
+
+def main(argv):
+    # 子命令优先：`pkgtrans setup pamac` 之类不会被当成要包装的命令
+    if argv and argv[0] in SUBCOMMANDS:
+        return dispatch_subcommand(argv[0], argv[1:])
+
+    try:
+        cli, command, cmdargs = parse_args(argv)
+    except UsageError as exc:
+        fail(str(exc))
+        note(f"试试 `{PROG} help`")
+        return 2
+
+    if cli.get("help"):
+        write_stdout(HELP)
+        return 0
+    if cli.get("version"):
+        return cmd_info()
+    if cli.get("shell_init"):
+        shell = cli["shell_init"] if isinstance(cli["shell_init"], str) else guess_shell()
+        st0 = load_settings(cli)
+        write_stdout(shell_snippet(shell, shell_targets(st0)))
+        return 0
+    if cli.get("install_shell"):
+        st0 = load_settings(cli)
+        return 0 if install_shell(guess_shell(), shell_targets(st0)) else 1
+    if cli.get("uninstall_shell"):
+        return uninstall_shell(guess_shell())
+
+    st = load_settings(cli)
+    for err in st.errors:
+        eprint(f"{PROG}: {err}")
+
+    if cli.get("show_config"):
+        return do_show_config(st)
+    if cli.get("check"):
+        return do_check(st, cli)
+    if cli.get("clear_cache"):
+        return do_clear_cache(st)
+
+    disabled = (not as_bool(st["enabled"])) or cli.get("raw") \
+        or bool(os.environ.get("PSTRANS_DISABLE"))
+
+    # ---- 管道模式 ----
+    if command is None:
+        if sys.stdin.isatty():
+            write_stdout(HELP)
+            return 0
+        text = read_stdin()
+        if disabled:
+            write_stdout(text)
+            return 0
+        dialect = cli.get("dialect") or detect_dialect(text)
+        if dialect == "auto":
+            dialect = detect_dialect(text)
+        if cli.get("verbose"):
+            eprint(f"{PROG}: 管道模式，识别为 {dialect} 格式")
+        write_stdout(process(text, st, cli, dialect))
+        return 0
+
+    # ---- 命令模式 ----
+    if disabled:
+        mode, dialect = "other", "pacman"
+    else:
+        mode, dialect = classify(command, cmdargs)
+    binary = resolve_binary(command)
+    if binary is None:
+        eprint(f"{PROG}: 找不到命令 {command}")
+        return 127
+
+    if mode == "other":
+        # 完全透传：不捕获输出，终端/交互/退出码/信号全部保持原样
+        try:
+            os.execv(binary, [command] + cmdargs)
+        except OSError as exc:
+            eprint(f"{PROG}: 无法执行 {binary}: {exc}")
+            return 126
+
+    # 搜索/信息类：捕获输出后翻译
+    try:
+        proc = subprocess.run(
+            [binary] + cmdargs,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=None,          # stderr 直接透传，yay/pamac 的进度提示照常显示
+            check=False,
+        )
+    except OSError as exc:
+        eprint(f"{PROG}: 无法执行 {binary}: {exc}")
+        return 126
+    text = proc.stdout.decode("utf-8", "replace")
+    if proc.returncode != 0 and not text.strip():
+        return proc.returncode
+    columns = flatpak_columns(cmdargs) if dialect == "flatpak" else None
+    write_stdout(process(text, st, cli, dialect, columns))
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        eprint(f"\n{PROG}: 已中断")
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)
