@@ -607,6 +607,16 @@ if "search" in argv:
     check("不支持的 shell：明确报错而不是瞎写 .zshrc",
           code == 1 and "不支持" in err, f"code={code} {err!r}"[:200])
 
+    # 终端模拟器 ≠ shell：提示语要点出「窗口」和「shell」两层（提示走 stderr）
+    code, out, err = run(["setup"], env_extra={"KITTY_WINDOW_ID": "1"}, **common)
+    check("提示语能认出 kitty 窗口", "kitty 窗口" in err and "exec zsh" in err, f"{err!r}"[:220])
+    code, out, err = run(["setup"], env_extra={"KONSOLE_VERSION": "260800",
+                                              "KONSOLE_DBUS_SERVICE": ":1.5"}, **common)
+    check("KONSOLE_* 泄露时不会被误报成 Konsole（弱信号不用）",
+          "Konsole" not in err and "新开一个终端窗口" in err, f"{err!r}"[:220])
+    code, out, err = run(["setup"], env_extra={"SHELL": "/bin/bash"}, **common)
+    check("提示语跟着 shell 走（bash 时 exec bash）", "exec bash" in err, f"{err!r}"[:220])
+
     code, out, err = run(["off"], **common)
     check("off：提示已关闭并写盘", "已关闭" in err and "enabled = 0" in open(cfg).read(),
           f"{err!r}"[:200])

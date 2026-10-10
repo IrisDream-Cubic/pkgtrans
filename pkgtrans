@@ -1548,6 +1548,31 @@ def rc_path_for(shell: str) -> str:
     return expand("~/.zshrc" if shell != "bash" else "~/.bashrc")
 
 
+def terminal_name() -> str:
+    """猜一下当前终端模拟器，只为了让提示语更具体；拿不准就返回空。
+
+    注意终端模拟器和 shell 是两层：kitty/konsole 开窗口，zsh/bash 解释命令。
+    这里返回的是窗口那层，用来告诉用户「新开一个 X 窗口」。
+
+    只用「不会被继承下去」的强标记。像 KONSOLE_* 那组变量会从 KDE 会话
+    泄露给不相关的进程（本机容器里就残留着 KONSOLE_VERSION），拿它判断会误报，
+    所以宁可退回泛化的「新开一个终端窗口」。
+    """
+    env = os.environ
+    if env.get("KITTY_WINDOW_ID"):
+        return "kitty"
+    if env.get("WEZTERM_PANE"):
+        return "WezTerm"
+    if env.get("ALACRITTY_WINDOW_ID") or env.get("ALACRITTY_LOG"):
+        return "Alacritty"
+    if env.get("WT_SESSION"):
+        return "Windows Terminal"
+    program = (env.get("TERM_PROGRAM") or "").strip()
+    if program and len(program) <= 24 and not program.startswith("xterm"):
+        return program
+    return ""
+
+
 def require_shell():
     """拿到可用的 shell 名；不支持时给出明确提示并返回 None。"""
     shell = guess_shell()
@@ -2279,8 +2304,16 @@ def _print_manager_table(st: Settings):
         print(f"  {_pad(name, 12)}{_pad('✓' if installed else '-', 8)}"
               f"{'✓' if name in active else '-'}")
     note(f"用法：`{PROG} setup <名字…>` 接管，`{PROG} putes <名字…>` 取消，all 表示全部")
-    note(f"改「接管哪些命令」要新开终端或 `exec {guess_shell() or 'zsh'}` 才生效；"
-         f"改语言 / 密钥 / 开关是立刻生效的")
+    note(f"改「接管哪些命令」要 {_restart_hint()}")
+    note("改语言 / 密钥 / 开关是立刻生效的，不用重启 shell")
+
+
+def _restart_hint() -> str:
+    """「怎么让新的 shell 集成生效」的一句话，把 shell 和终端两层的名字都点出来。"""
+    shell = guess_shell() or "zsh"
+    term = terminal_name()
+    where = f"新开一个 {term} 窗口" if term else "新开一个终端窗口"
+    return f"{where}，或在当前 shell 里 `exec {shell}` 后生效"
 
 
 def _write_targets(st: Settings, targets) -> bool:
@@ -2299,8 +2332,8 @@ def _write_targets(st: Settings, targets) -> bool:
     st.set("shell_targets", value, "cli")
     rc = rc_path_for(shell)
     ok(f"已更新 {rc} 的 shell 集成（当前接管：{', '.join(targets) or '无'}）")
-    note(f"新开终端或 `exec {shell}` 后生效"
-         f"（运行中的 shell 不会自己重读 {os.path.basename(rc)}）")
+    note(_restart_hint())
+    note(f"（{shell} 是你的登录 shell；运行中的它不会自己重读 {os.path.basename(rc)}）")
     return True
 
 
