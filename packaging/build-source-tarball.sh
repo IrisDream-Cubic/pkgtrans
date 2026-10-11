@@ -8,7 +8,7 @@
 
 set -eu
 
-VERSION="${1:-1.0}"
+VERSION="${1:-$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$ROOT/pkgtrans" | head -1)}"
 OUT="${2:-dist}"
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 NAME="pkgtrans-$VERSION"

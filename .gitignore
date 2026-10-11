@@ -4,6 +4,7 @@ __pycache__/
 dist/
 out/
 out2/
+.build/
 result
 result-*
 flake.lock.generated

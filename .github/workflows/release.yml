@@ -161,25 +161,23 @@ jobs:
           path: out/*.rpm
 
   nix:
-    name: Nix 包
+    name: Nix flake 可构建
     needs: [version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v27
-      - name: 构建并冒烟测试
+      # 只验证、不产出可下载的包：nix build 的结果里 shebang 指向 /nix/store/...，
+      # 那个路径只在构建机上存在，打成 tarball 发出去别人跑不起来。
+      # Nix 用户的安装方式本来就是 flake：
+      #   nix run github:IrisDream-Cubic/pkgtrans -- keylist
+      - name: 构建 + 冒烟测试
         run: |
           nix build .# --print-build-logs
           ./result/bin/pkgtrans --version | tail -4
           ./result/bin/pkgtrans help > /dev/null
-      - name: 打成 tarball 附件
-        run: |
-          mkdir -p out
-          tar -czf "out/pkgtrans-${{ needs.version.outputs.version }}-nix-x86_64-linux.tar.gz" -C result .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: nix-package
-          path: out/*.tar.gz
+          env -i ./result/bin/pkgtrans --version > /dev/null
+          echo "✓ flake 构建通过，env -i 下也能跑"
 
   release:
     name: 发 Release

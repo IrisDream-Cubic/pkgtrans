@@ -96,6 +96,10 @@ sudo dnf install ./pkgtrans-1.0-1.noarch.rpm
 
 ### Nix / NixOS
 
+**Nix 不通过下载包安装，而是直接用仓库里的 flake**（这也是为什么 Release 里没有
+nix 的 `.tar.gz`——`nix build` 的产物里 shebang 指向 `/nix/store/...`，那个路径只
+存在于构建它的机器上，打包发出来在别人机器上是跑不起来的）：
+
 ```sh
 # 临时用一次
 nix run github:IrisDream-Cubic/pkgtrans -- keylist
@@ -104,7 +108,9 @@ nix run github:IrisDream-Cubic/pkgtrans -- keylist
 nix profile install github:IrisDream-Cubic/pkgtrans
 
 # 或者在 configuration.nix 里
-#   environment.systemPackages = [ (pkgs.callPackage (fetchTarball "...") { }) ];
+#   environment.systemPackages = [
+#     (builtins.getFlake "github:IrisDream-Cubic/pkgtrans").packages.${system}.default
+#   ];
 ```
 
 ### 其它发行版 / 不想用包管理器
@@ -126,13 +132,29 @@ nix profile install github:IrisDream-Cubic/pkgtrans
 | 格式 | 文件 | 构建方式 |
 | --- | --- | --- |
 | Arch | `pkgtrans-1.0-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
-| deb | `pkgtrans_1.0-1_all.deb` | `dpkg-deb`，没有则用 `packaging/build-deb.py` 手工组装 |
-| rpm | `pkgtrans-1.0-1.noarch.rpm` | `rpmbuild -ba packaging/pkgtrans.spec` |
-| Nix | flake 输出 | `nix build .#`（`flake.nix` + `default.nix`） |
-| 源码 | `pkgtrans-1.0.tar.gz` | `sh packaging/build-source-tarball.sh` |
+| deb | `pkgtrans_1.0-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
+| rpm | `pkgtrans-1.0-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
+| 源码 | `pkgtrans-1.0.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
+| Nix | *不发布 tarball* | flake 就是交付方式，见上面「Nix / NixOS」 |
 
-一次性全构建：`sh packaging/build-all.sh`（本机缺的工具链会明确跳过）。
-四个格式的完整构建与安装验证在 CI 里跑：见 `.github/workflows/release.yml`。
+一次性全构建：
+
+```sh
+sh packaging/build-all.sh dist
+```
+
+优先用本机工具链，缺哪个就用 Docker 顶上（跑的是和 CI 完全相同的命令，所以
+本机没有 `rpmbuild` / `nix` 也能把 rpm 构建出来并验证 flake）。国内拉不动
+Docker Hub 时可以换镜像源：
+
+```sh
+PSTRANS_FEDORA_IMAGE=docker.m.daocloud.io/library/fedora:latest \
+PSTRANS_NIX_IMAGE=dockerproxy.com/nixos/nix:latest \
+sh packaging/build-all.sh dist
+```
+
+版本号只有一个来源：主程序的 `__version__`，脚本都从那里读（有自测盯着，
+改一处忘一处会直接挂）。完整构建 + 安装验证在 CI 里跑，见 `.github/workflows/release.yml`。
 
 ## 快速开始
 

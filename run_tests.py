@@ -861,6 +861,28 @@ if "search" in argv:
     check("info：翻译失败时原文逐字节还原（续行缩进不变）", out == INFO_TXT,
           f"{out!r}"[:250])
 
+    # ---------- 22. 版本号一致性 ----------
+    print("[22] 版本号只有一个来源")
+    repo = os.path.dirname(os.path.abspath(__file__))
+
+    def _grab(rel, pattern):
+        try:
+            with open(os.path.join(repo, rel), encoding="utf-8") as fh:
+                m = re.search(pattern, fh.read(), re.M)
+        except OSError:
+            return None
+        return m.group(1) if m else None
+
+    found = {
+        "pkgtrans": _grab("pkgtrans", r'^__version__ = "([^"]+)"'),
+        "PKGBUILD": _grab("packaging/PKGBUILD", r"^pkgver=(\S+)"),
+        "spec": _grab("packaging/pkgtrans.spec", r"^Version:\s+(\S+)"),
+        "default.nix": _grab("default.nix", r'version = "([^"]+)"'),
+    }
+    vals = {k: v for k, v in found.items() if v}
+    check("版本号四处一致（改一处忘一处会在这里挂）",
+          len(vals) == 4 and len(set(vals.values())) == 1, str(found))
+
     print()
     print("=" * 62)
     print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")
