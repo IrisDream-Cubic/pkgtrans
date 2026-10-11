@@ -73,7 +73,7 @@ makepkg -si
 或者直接从 Release 里下 `.pkg.tar.zst`：
 
 ```sh
-sudo pacman -U pkgtrans-1.0-1-any.pkg.tar.zst
+sudo pacman -U pkgtrans-1.1-1-any.pkg.tar.zst
 ```
 
 （AUR 上架后 `yay -S pkgtrans` 即可。）
@@ -81,17 +81,17 @@ sudo pacman -U pkgtrans-1.0-1-any.pkg.tar.zst
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install ./pkgtrans_1.0-1_all.deb
+sudo apt install ./pkgtrans_1.1-1_all.deb
 # 或
-sudo dpkg -i pkgtrans_1.0-1_all.deb
+sudo dpkg -i pkgtrans_1.1-1_all.deb
 ```
 
 ### Fedora / RHEL / openSUSE
 
 ```sh
-sudo rpm -ivh pkgtrans-1.0-1.noarch.rpm
+sudo rpm -ivh pkgtrans-1.1-1.noarch.rpm
 # 或
-sudo dnf install ./pkgtrans-1.0-1.noarch.rpm
+sudo dnf install ./pkgtrans-1.1-1.noarch.rpm
 ```
 
 ### Nix / NixOS
@@ -131,10 +131,10 @@ nix profile install github:IrisDream-Cubic/pkgtrans
 
 | 格式 | 文件 | 构建方式 |
 | --- | --- | --- |
-| Arch | `pkgtrans-1.0-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
-| deb | `pkgtrans_1.0-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
-| rpm | `pkgtrans-1.0-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
-| 源码 | `pkgtrans-1.0.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
+| Arch | `pkgtrans-1.1-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
+| deb | `pkgtrans_1.1-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
+| rpm | `pkgtrans-1.1-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
+| 源码 | `pkgtrans-1.1.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
 | Nix | *不发布 tarball* | flake 就是交付方式，见上面「Nix / NixOS」 |
 
 一次性全构建：

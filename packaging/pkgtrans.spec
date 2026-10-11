@@ -1,5 +1,5 @@
 Name:           pkgtrans
-Version:        1.0
+Version:        1.1
 Release:        1%{?dist}
 Summary:        AI translation for package manager search results
 Summary(zh_CN): 用 AI 翻译包管理器搜索结果的描述文字
@@ -52,5 +52,10 @@ install -Dpm0644 packaging/_pkgtrans \
 %license LICENSE
 
 %changelog
-* Sat Oct 10 2026 Toru Momose <iris@iris-dream.top> - 1.0-1
-- 首个版本：三种方言解析、多 API Key、目标语言、shell 集成
+* Sun Oct 11 2026 Toru Momose <iris@iris-dream.top> - 1.1-1
+- 支持 9 个命令 / 5 种输出方言：pacman、yay、paru、pamac、flatpak、
+  apt、apt-cache、dnf、yum；信息类命令 -Si / -Qi / show / info 也支持
+- 多 API Key 管理与失败自动回退，可锁定为只用其中一个
+- 目标语言可切换（简体 / 繁體 / 日本語 / 한국어 / 世界语 / …）
+- setup / putes 按包管理器维护 shell 集成，on / off 全局开关
+- 翻译成功的描述显示红色，失败原样回退并显示黄色

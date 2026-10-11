@@ -6,7 +6,9 @@
 ar 归档 + control.tar.gz + data.tar.gz，产出结构等价的包。
 
 用法:
-    python3 packaging/build-deb.py [--outdir dist] [--version 1.0] [--revision 1]
+    python3 packaging/build-deb.py [--outdir dist] [--version X.Y] [--revision 1]
+
+版本号默认从主程序的 __version__ 读，不在这里再写一份。
 """
 
 import argparse
@@ -14,6 +16,7 @@ import gzip
 import hashlib
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +27,13 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAINTAINER = "Toru Momose <iris@iris-dream.top>"
 HOMEPAGE = "https://github.com/IrisDream-Cubic/pkgtrans"
+
+
+def source_version() -> str:
+    """版本号只有一个来源：主程序的 __version__。"""
+    with open(os.path.join(ROOT, "pkgtrans"), encoding="utf-8") as fh:
+        m = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M)
+    return m.group(1) if m else "0.0"
 EPOCH = 1700000000          # 固定时间戳，保证可重复构建
 
 
@@ -56,12 +66,12 @@ def install_tree(root: str, version: str):
 def changelog_text(version: str) -> str:
     return f"""pkgtrans ({version}-1) unstable; urgency=medium
 
-  * 支持 apt search / apt-cache search / apt show 与 flatpak search
+  * 支持 apt / apt-cache / dnf / yum / flatpak / pacman / pamac 等 9 个命令
   * 多 API Key 管理与失败自动回退，可锁定为只用一个
-  * 目标语言可切换（简体 / 繁體 / 日本語 / 世界语 …）
+  * 目标语言可切换（简体 / 繁體 / 日本語 / 한국어 / 世界语 …）
   * setup / putes 管理 shell 集成，on / off 全局开关
 
- -- {MAINTAINER}  Sat, 10 Oct 2026 12:00:00 +0800
+ -- {MAINTAINER}  Sun, 11 Oct 2026 12:00:00 +0800
 """
 
 
@@ -247,7 +257,7 @@ def verify_deb(path: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", default=os.path.join(ROOT, "dist"))
-    ap.add_argument("--version", default="1.0")
+    ap.add_argument("--version", default=source_version())
     ap.add_argument("--revision", default="1")
     args = ap.parse_args()
 

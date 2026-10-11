@@ -47,7 +47,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 
-__version__ = "1.0"
+__version__ = "1.1"
 DEVELOPER = "Toru Momose"
 DEVELOPER_URL = "https://iris-dream.top"
 BUILT_WITH = "DeepSeek v4 Pro"

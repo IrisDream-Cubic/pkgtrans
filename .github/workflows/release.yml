@@ -8,7 +8,7 @@ on:
       version:
         description: 版本号（可带或不带 v）
         required: true
-        default: '1.0'
+        default: '1.1'
 
 # 需要 contents: write 才能创建 Release。
 # 注意：仓库设置里若把 Actions 的 Workflow permissions 设成只读，

@@ -750,7 +750,7 @@ if "search" in argv:
           and all(ord(c) < 128 for l in out.splitlines()[:5] for c in l),
           f"{out.splitlines()[:5]!r}"[:160])
     check("info：开发者/版本/开发/网址齐全",
-          "Toru Momose" in out and "1.0" in out and "DeepSeek v4 Pro" in out
+          "Toru Momose" in out and mod.__version__ in out and "DeepSeek v4 Pro" in out
           and "https://iris-dream.top" in out, f"{out!r}"[:300])
     for flag in ("-v", "--version"):
         code, out, err = run([flag], **common)
@@ -882,6 +882,11 @@ if "search" in argv:
     vals = {k: v for k, v in found.items() if v}
     check("版本号四处一致（改一处忘一处会在这里挂）",
           len(vals) == 4 and len(set(vals.values())) == 1, str(found))
+
+    # README 里的包文件名也带着版本号，同样容易漂
+    readme_vers = set(re.findall(r"pkgtrans[-_](\d+\.\d+)", readme))
+    check("README 里的包名版本与主程序一致",
+          readme_vers and readme_vers == {found["pkgtrans"]}, str(readme_vers))
 
     print()
     print("=" * 62)
