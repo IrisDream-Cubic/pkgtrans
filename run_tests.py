@@ -563,6 +563,17 @@ if "search" in argv:
         (("flatpak", ["install", "x"]), ("other", "flatpak")),
         (("flatpak", ["run", "org.x"]), ("other", "flatpak")),
         (("flatpak", ["search", "-j", "x"]), ("other", "flatpak")),
+        (("apt", ["search", "vim"]), ("search", "apt")),
+        (("apt", ["show", "vim"]), ("info", "apt-info")),
+        (("apt", ["install", "vim"]), ("other", "apt")),
+        (("apt-get", ["upgrade"]), ("other", "apt")),
+        (("apt-cache", ["search", "vim"]), ("search", "apt-cache")),
+        (("apt-cache", ["show", "vim"]), ("info", "apt-info")),
+        (("apt-cache", ["depends", "vim"]), ("other", "apt-cache")),
+        (("dnf", ["search", "vim"]), ("search", "dnf")),
+        (("dnf", ["info", "vim"]), ("info", "dnf-info")),
+        (("dnf", ["upgrade"]), ("other", "dnf")),
+        (("yum", ["search", "vim"]), ("search", "dnf")),
     ]
     bad = [f"{c} {a} -> {mod.classify(c, a)} (期望 {w})" for (c, a), w in cases
            if mod.classify(c, a) != w]
@@ -771,6 +782,84 @@ if "search" in argv:
         check("README：图案与程序输出逐字节一致",
               blocks[0].rstrip("\n") == mod.banner("PKGTRANS"),
               f"readme={blocks[0]!r}"[:160])
+
+    # ---------- 20. apt / apt-cache / dnf 方言 ----------
+    print("[20] apt / apt-cache / dnf（Debian / Fedora 上的包管理器）")
+    APT = ("Sorting...\nFull Text Search...\n"
+           "neovim/noble 0.9.5-6ubuntu2 amd64\n"
+           "  heavily refactored vim fork\n\n"
+           "neovim-qt/noble 0.2.18-1build2 amd64\n"
+           "  neovim client library and GUI\n")
+    APTCACHE = ("dh-vim-addon - debhelper addon to help package Vim/Neovim addons\n"
+                "neovim - heavily refactored vim fork\n"
+                "neovim-qt - neovim client library and GUI\n")
+    DNF = ("Matched fields: name (exact)\n"
+           " neovim.x86_64\tVim-fork focused on extensibility and agility\n"
+           "Matched fields: name, summary\n"
+           " python3.11-neovim.noarch\tPython client to Neovim\n")
+
+    reset()
+    code, out, err = run(["--color", "always"], stdin=APT.encode())
+    check("apt search：缩进描述被翻译并上色",
+          f"  {RED}【译】heavily refactored vim fork{RST}" in out, f"{out!r}"[:200])
+    check("apt search：包头行与 Sorting... 原样保留",
+          "neovim/noble 0.9.5-6ubuntu2 amd64" in out and "Sorting..." in out
+          and "Full Text Search..." in out, f"{out!r}"[:200])
+
+    reset()
+    code, out, err = run(["--color", "always"], stdin=APTCACHE.encode())
+    check("apt-cache：只换描述，`名字 - ` 前缀保留",
+          f"neovim - {RED}【译】heavily refactored vim fork{RST}" in out, f"{out!r}"[:200])
+
+    reset()
+    code, out, err = run(["--color", "always"], stdin=DNF.encode())
+    check("dnf search：TAB 结构完整、只换描述",
+          f" neovim.x86_64\t{RED}【译】Vim-fork focused on extensibility and agility{RST}"
+          in out, f"{out!r}"[:220])
+    check("dnf search：名字带点的包（python3.11-neovim）也能正确断开",
+          f" python3.11-neovim.noarch\t{RED}【译】Python client to Neovim{RST}" in out,
+          f"{out!r}"[:220])
+    check("dnf search：`Matched fields:` 元信息行原样保留",
+          "Matched fields: name (exact)" in out, f"{out!r}"[:200])
+
+    for sample, want, label in ((APT, "pacman", "apt search"),
+                                (APTCACHE, "apt-cache", "apt-cache search"),
+                                (DNF, "dnf", "dnf search")):
+        reset("http500")
+        code, out, err = run(["--color", "always", "--verbose"], stdin=sample.encode())
+        check(f"管道自动识别 {label} -> {want}",
+              f"识别为 {want} 格式" in err, f"{err!r}"[:200])
+
+    # ---------- 21. 信息类输出（apt show / dnf info / pamac info）----------
+    print("[21] 信息类：字段值折行 + 续行合并")
+    INFO_TXT = ("Available packages\n"
+                "Name           : neovim\n"
+                "Version        : 0.12.5\n"
+                "Repository     : extra\n"
+                "Summary        : Vim-fork focused on extensibility and agility\n"
+                "URL            : https://neovim.io\n"
+                "Description    : Neovim is a refactor - and sometimes redactor - in the tradition of\n"
+                "               : Vim, which itself derives from Stevie.\n")
+    reset("http500")
+    code, out, err = run(["--color", "always", "--verbose"], stdin=INFO_TXT.encode())
+    check("管道识别 info 型输出（不是 pacman——那个方言不合并续行）",
+          "识别为 info 格式" in err, f"{err!r}"[:200])
+
+    reset()
+    code, out, err = run(["--color", "always"], stdin=INFO_TXT.encode())
+    body = plain(out)
+    check("info：Summary 与 Description 都被翻译", body.count("【译】") == 2, f"{body!r}"[:250])
+    check("info：Description 的续行并入同一句（续行重复的冒号已去掉）",
+          "【译】Neovim is a refactor - and sometimes redactor - in the tradition of "
+          "Vim, which itself derives from Stevie." in re.sub(r"\n\s+", " ", body),
+          f"{body!r}"[:300])
+    check("info：`Repository     : extra` 没被误判成 pamac 包头",
+          "Repository     : extra" in body, f"{body!r}"[:250])
+
+    reset("http500")
+    code, out, err = run([], stdin=INFO_TXT.encode())
+    check("info：翻译失败时原文逐字节还原（续行缩进不变）", out == INFO_TXT,
+          f"{out!r}"[:250])
 
     print()
     print("=" * 62)

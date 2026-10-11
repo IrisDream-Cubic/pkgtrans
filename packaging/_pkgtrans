@@ -35,7 +35,7 @@ _pkgtrans() {
       ;;
     setup|putes|putesy|unsetup)
       local -a managers
-      managers=(all pacman yay paru pamac flatpak)
+      managers=(all pacman yay paru pamac flatpak apt apt-cache dnf yum)
       _describe -t managers '包管理器' managers
       ;;
     keyprefer|keyremove)

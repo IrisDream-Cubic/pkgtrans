@@ -13,8 +13,20 @@
 - 翻译**成功** → 描述文字显示为 <span style="color:red">**红色**</span>
 - 翻译**失败** → 描述文字显示为 <span style="color:gold">**黄色**</span>（原样回退，绝不影响包管理器本身）
 
-支持 `pacman` / `yay` / `paru` / `pamac` / `flatpak` 五家——它们的语法和输出格式各不相同
-（旗标式 vs 子命令式、单行 vs 折行 vs TSV），工具会各自解析。
+支持 **9 个命令、5 种输出方言**——它们的语法和格式各不相同（旗标式 / 子命令式、
+单行 / 缩进 / 折行 / TSV），工具会各自解析：
+
+| 发行版 | 命令 | 输出形态 |
+| --- | --- | --- |
+| Arch / Manjaro | `pacman` `yay` `paru` | `仓库/名字 版本` + 4 空格缩进描述 |
+| Arch / Manjaro | `pamac` | `名字 版本 …右对齐仓库` + **折行**描述 |
+| Debian / Ubuntu | `apt` | `名字/仓库 版本 架构` + 2 空格缩进描述 |
+| Debian / Ubuntu | `apt-cache` | 单行 `名字 - 描述` |
+| Fedora / RHEL | `dnf` `yum` | ` 名字.架构`**TAB**描述 |
+| 通用 | `flatpak` | **TSV**，描述是其中一列 |
+
+信息类命令也支持：`pacman -Si`、`pacman -Qi`、`pamac info`、`apt show`、`dnf info`
+（字段值折行、缩进续行都会正确合并再翻译）。
 
 ```
 $ pacman -Ss neovim
@@ -217,6 +229,8 @@ pkgtrans aim 文言文           # 不认识的直接当语言名用
 ```sh
 pkgtrans setup                 # 看状态表
 pkgtrans setup pamac flatpak   # 接管这两个
+pkgtrans setup apt flatpak     # Debian / Ubuntu
+pkgtrans setup dnf             # Fedora / RHEL
 pkgtrans setup all             # 接管所有已安装的
 pkgtrans putes pamac           # 取消 pamac（setup 反过来写）
 pkgtrans putes all             # 全部取消
@@ -229,6 +243,10 @@ pkgtrans putes all             # 全部取消
   paru        -       -
   pamac       ✓       ✓
   flatpak     ✓       ✓
+  apt         -       -
+  apt-cache   -       -
+  dnf         -       -
+  yum         -       -
 ```
 
 配置里 `shell_targets` 的含义：留空 / `auto` = 所有已安装的；`none` = 一个都不接管；
@@ -244,9 +262,15 @@ pamac info neovim                 # Description 字段（值折行也能合并�
 flatpak search neovim             # TSV，只动 description 列
 pacman -Si neovim                 # -Si / -Qi 的 Description 也会翻译
 
+apt search neovim                 # Debian / Ubuntu
+apt-cache search neovim           # 单行格式
+apt show neovim                   # Description 字段
+dnf search neovim                 # Fedora / RHEL
+dnf info neovim
+
 pkgtrans pacman -Ss neovim        # 手动指定命令
 pkgtrans --lang 繁體中文 yay -Ss neovim
-pamac search neovim | pkgtrans    # 管道过滤（自动识别 pacman/pamac/flatpak 格式）
+apt search neovim | pkgtrans      # 管道过滤（自动识别 5 种方言）
 pkgtrans --dialect pamac < out.txt
 
 pkgtrans off                      # 全局关闭，一切原样透传
@@ -299,19 +323,24 @@ PSTRANS_DISABLE=1 pacman -Ss x    # 只关这一次
 
 ## 安全性：为什么不会干扰 `pacman -Syu`
 
-shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` 包了一层函数，
-函数把参数交给 `pkgtrans` 判断：
+shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-cache` /
+`dnf` / `yum` 包了一层函数，函数把参数交给 `pkgtrans` 判断：
 
 | 调用 | 行为 |
 | --- | --- |
-| `pacman -Ss` `-Qs` `-Fs` `-Ssq` `--search` | 捕获输出 → 翻译描述 → 原样保留其他行 |
-| `pacman -Si` `-Qi` `pamac info` | 只翻译 `Description` 字段（含折行的值） |
-| `pamac search` / `flatpak search` | 翻译描述；pamac 折行合并后重排，flatpak 只改 description 列 |
-| `-Syu` `-S` `-R` `-Q` `-Sl` `-F`、`pamac install/update/…`、`flatpak run/install/list/…` | **`exec` 完全透传**，不捕获输出、不改一个字节、退出码和信号完全一致 |
+| `pacman -Ss` `-Qs` `-Fs` `-Ssq` `--search`、`apt search`、`apt-cache search`、`dnf search`、`flatpak search` | 捕获输出 → 翻译描述 → 原样保留其他行 |
+| `pacman -Si` `-Qi`、`pamac info`、`apt show`、`dnf info` | 只翻译 `Description` / `Summary` 字段（含折行与续行） |
+| `pamac search` | 折行描述合并后翻译，再按原宽度折回 |
+| `-Syu` `-S` `-R` `-Q` `-Sl` `-F`、`pamac install/update/…`、`flatpak run/install/list/…`、**`apt install/upgrade/…`、`dnf upgrade/install/…`** | **`exec` 完全透传**，不捕获输出、不改一个字节、退出码和信号完全一致 |
 | `flatpak search --json` | 透传（机器可读格式不碰） |
 
 判断逻辑对 `-R -s`（recursive，不是 search）、`-Rns`、`-Slq`、`-b<路径>` 这类容易误判的情况
-都做了区分，16 条分类用例全部通过。
+都做了区分，25 条分类用例全部通过。
+
+> 把 `apt` 也包一层会让人担心，但它和 pacman 那套一样走 **`os.execv` 完全替换进程**：
+> `apt install` 的交互提示、进度条、退出码、信号全都原样，只是多花约 30ms 起一个 Python。
+> 脚本里跑 `apt` 不受影响（非交互 shell 不读 `.zshrc`），`sudo apt` 也不受影响
+> （sudo 看不到 shell 函数，直接跑真二进制）。
 
 其它保障：
 
@@ -354,17 +383,20 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` 包了一层函�
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **103 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **130 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
 - 协议：OpenAI 兼容 + Anthropic
-- 方言：pacman 旗标、pamac 折行合并与折回、pamac info 字段续行、flatpak TSV 列完整性与 `--columns`、
-  `--json` 透传、管道模式自动识别
+- 方言：pacman 旗标、pamac 折行合并与折回、flatpak TSV 列完整性与 `--columns`、
+  `--json` 透传、**apt / apt-cache / dnf**、管道模式自动识别 6 种方言
+- 信息类：`Summary` / `Description` 字段值折行、**续行合并**（含 dnf 续行重复的冒号）、
+  失败时逐字节还原
 - 子命令：`keyadd/keylist/keyprefer/keyremove/keylock/keyunlock`、
   `aim`（含 `zh-hant` `eo-latn` `default`）、`on/off`、`setup/putes/putesy`、`info`、`help`
 - 多密钥：优先密钥 401 时自动切换备用；`keylock` 后不切换
-- 安全性：16 条调用分类矩阵、`-Ssq` / `flatpak list` 等透传逐字节一致
+- 安全性：27 条调用分类矩阵、`-Ssq` / `flatpak list` 等透传逐字节一致
+- logo：纯 ASCII、无歧义宽度字符、README 与程序输出逐字节一致
 
 ## 开发者
 

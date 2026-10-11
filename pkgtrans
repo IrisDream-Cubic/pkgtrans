@@ -61,7 +61,8 @@ SHELL_BEGIN = "# >>> pkgtrans >>>"
 SHELL_END = "# <<< pkgtrans <<<"
 
 # 可以接管的包管理器
-KNOWN_MANAGERS = ["pacman", "yay", "paru", "pamac", "flatpak"]
+KNOWN_MANAGERS = ["pacman", "yay", "paru", "pamac", "flatpak",
+                  "apt", "apt-cache", "dnf", "yum"]
 
 # 翻译成功 -> 红色；失败 -> 黄色
 ESC = "\033["
@@ -703,7 +704,8 @@ HELP = f"""\
   --max-items <N>     单次最多翻译多少条（默认 300，0 = 不限）
   --timeout <秒>      单次请求超时（默认 30）
   --retries <N>       失败重试次数（默认 2）
-  --dialect <格式>    auto | pacman | pamac | flatpak（仅管道模式需要）
+  --dialect <格式>    auto | pacman | pamac | flatpak | apt | apt-cache | dnf
+                      （仅管道模式需要；auto 会自动认）
   --no-cache          本次不使用缓存
   --no-info           不翻译 -Si / -Qi 的 Description 字段
   --bilingual         译文后附上灰色原文
@@ -715,15 +717,22 @@ HELP = f"""\
 示例:
   {PROG} keyadd                     # 交互式添加第一个 API Key
   {PROG} aim zh-hant                # 改成繁体中文
-  {PROG} setup pamac flatpak        # 让 pamac / flatpak 也自动翻译
+  {PROG} setup apt flatpak          # 让 apt / flatpak 也自动翻译（Debian/Ubuntu）
   {PROG} off                        # 暂时全部关掉
   {PROG} check                      # 看看到底通不通
 
-  pacman -Ss neovim                 # 透明拦截（setup 生效时）
+  # Arch / Manjaro
+  pacman -Ss neovim
   yay -Ss neovim
   pamac search neovim
+  # Debian / Ubuntu
+  apt search neovim
+  apt-cache search neovim
+  # Fedora / RHEL
+  dnf search neovim
+  # 通用
   flatpak search neovim
-  pacman -Ss neovim | {PROG}         # 管道过滤
+  apt search neovim | {PROG}          # 管道过滤
 """
 
 
@@ -739,7 +748,7 @@ PNAME = r"[A-Za-z0-9@._+][A-Za-z0-9@._+:-]*"
 HEADER_RE = re.compile(rf"^(?P<repo>{REPO})/(?P<name>{PNAME})\s+\S")
 # 形如 `Description     : Fork of Vim ...`（兼容中文字段名）
 INFO_RE = re.compile(r"^(?P<label>[^:\s][^:]*?)\s*:\s*(?P<value>\S.*)$")
-INFO_LABELS = {"description", "描述", "简介"}
+INFO_LABELS = {"description", "summary", "描述", "简介", "摘要"}
 
 KIND_OTHER = "other"
 KIND_DESC = "desc"
@@ -808,11 +817,17 @@ class Segment:
 
 
 def _is_pamac_header(plain: str) -> bool:
-    """pamac search 的包头：`名字  版本 …<右对齐>仓库`，不是 `repo/name` 形式。"""
+    """pamac search 的包头：`名字  版本 …<右对齐>仓库`，不是 `repo/name` 形式。
+
+    要排除 `Repository      : extra` 这类「字段 : 值」行——它的最后一个词
+    可能正好是个仓库名（extra / core / updates），会被误当成包头。
+    判据是第二个词恰好是单独的冒号；pamac 的版本号里即使有冒号（epoch，
+    如 `1:1.0.11-1`）也是粘在数字里的，不会被 split 成独立的 `:`。
+    """
     if plain[:1].isspace():
         return False
     toks = plain.split()
-    if len(toks) < 3 or "/" in toks[0]:
+    if len(toks) < 3 or toks[1] == ":" or "/" in toks[0]:
         return False
     return toks[-1].lower() in PAMAC_REPOS or bool(VERSIONISH_RE.match(toks[1]))
 
@@ -824,19 +839,29 @@ def _pamac_info_field(lines, i):
     if not m or m.group("label").strip().lower() not in INFO_LABELS:
         return None
     parts = [m.group("value")]
+    cont_indent = None
     k = i + 1
     while k < len(lines):
         nxt = ANSI_RE.sub("", lines[k])
         if nxt.strip() and nxt[:1].isspace():
+            if cont_indent is None:
+                cont_indent = nxt[: len(nxt) - len(nxt.lstrip())]
             parts.append(nxt.strip())
             k += 1
         else:
             break
     width = max(display_width(p) for p in parts) if len(parts) > 1 else 0
     prefix = plain[: m.start("value")]
-    return Segment(prefix, " ".join(parts), KIND_INFO, wrap_width=width,
-                   raw_lines=parts,
-                   cont_prefix=" " * display_width(prefix)), k
+    # 续行缩进沿用原文的，这样翻译失败时逐字还原出来和原样一模一样
+    # （dnf info 的续行是 15 空格 + `: `，并不等于前缀宽度 17）。
+    if cont_indent is None:
+        cont_indent = " " * display_width(prefix)
+    # 合并成一句时，去掉续行开头重复的冒号：dnf info / rpm 会在续行再写一个
+    # `: `（纯为对齐），留着的话模型会看到夹在句子中间的冒号，影响译文。
+    # raw_lines 仍保留原样，失败回退时逐字还原。
+    joined = " ".join(re.sub(r"^:\s*", "", p) for p in parts)
+    return Segment(prefix, joined, KIND_INFO, wrap_width=width,
+                   raw_lines=parts, cont_prefix=cont_indent), k
 
 
 def analyze_pacman(text: str, translate_info: bool):
@@ -954,6 +979,40 @@ def analyze_flatpak(text: str, columns=None):
 
 PAMAC_SUBCOMMANDS = {"search", "info"}
 
+# dnf / yum search：` name.arch<TAB>描述`。架构名不含点，所以从最后一个点断开，
+# 对 python3.11-foo.x86_64 这种名字里带点的包也成立。
+DNF_LINE_RE = re.compile(r"^(?P<pre>\s*[^\t]+?\.[^.\s\t]+)\t(?P<desc>.+)$")
+# apt-cache search：单行 `名字 - 描述`
+APTCACHE_LINE_RE = re.compile(r"^(?P<name>\S+)\s+-\s+(?P<desc>.+)$")
+
+
+def analyze_dnf(text: str):
+    """dnf / yum search 的输出。
+
+    形如 ``  neovim.x86_64<TAB>Vim-fork focused on extensibility and agility``。
+    ``Matched fields: name (exact)`` 这类元信息行原样放过。
+    """
+    segments = []
+    for line in text.split("\n"):
+        m = DNF_LINE_RE.match(ANSI_RE.sub("", line))
+        if m:
+            segments.append(Segment(m.group("pre") + "\t", m.group("desc").strip(), KIND_DESC))
+        else:
+            segments.append(Segment("", line, KIND_OTHER))
+    return segments
+
+
+def analyze_aptcache(text: str):
+    """apt-cache search 的单行输出：``名字 - 描述``。"""
+    segments = []
+    for line in text.split("\n"):
+        m = APTCACHE_LINE_RE.match(ANSI_RE.sub("", line))
+        if m:
+            segments.append(Segment(m.group("name") + " - ", m.group("desc").strip(), KIND_DESC))
+        else:
+            segments.append(Segment("", line, KIND_OTHER))
+    return segments
+
 
 def detect_dialect(text: str) -> str:
     """管道模式下猜测输出是哪家的。"""
@@ -961,12 +1020,29 @@ def detect_dialect(text: str) -> str:
     for line in lines:
         if line.count("\t") >= 3:
             return "flatpak"
+    # dnf / yum：带前导空格的 `名字.架构<TAB>描述`
+    for line in lines:
+        if DNF_LINE_RE.match(ANSI_RE.sub("", line)):
+            return "dnf"
     for line in lines:
         plain = ANSI_RE.sub("", line).rstrip()
         if plain and not plain[:1].isspace():
             toks = plain.split()
-            if len(toks) >= 3 and "/" not in toks[0] and toks[-1].lower() in PAMAC_REPOS:
+            # toks[1] == ":" 用来排除 `Repository      : extra` 这类字段行
+            if len(toks) >= 3 and toks[1] != ":" and "/" not in toks[0] \
+                    and toks[-1].lower() in PAMAC_REPOS:
                 return "pamac"
+    # apt-cache：绝大多数非空行都是 `名字 - 描述`
+    body = [ANSI_RE.sub("", l) for l in lines if ANSI_RE.sub("", l).strip()]
+    if len(body) >= 3 and sum(1 for l in body if APTCACHE_LINE_RE.match(l)) >= len(body) * 0.9:
+        return "apt-cache"
+    # 信息类输出（pacman -Si、pamac info、apt show、dnf info）：几乎全是
+    # `字段 : 值` 行加缩进续行。必须认出来，否则会落到 pacman 方言，
+    # 而那个解析器不合并续行，Description 就只有第一行被翻译。
+    if len(body) >= 3:
+        shaped = sum(1 for l in body if l[:1].isspace() or INFO_RE.match(l))
+        if shaped >= len(body) * 0.8:
+            return "info"
     return "pacman"
 
 
@@ -974,8 +1050,14 @@ def analyze(text: str, translate_info: bool, dialect: str = "pacman", columns=No
     """把输出切成段落，标出哪些行是需要翻译的描述。"""
     if dialect == "flatpak":
         return analyze_flatpak(text, columns)
-    if dialect == "pamac":
+    if dialect in ("pamac", "info", "apt-info", "dnf-info"):
+        # pamac 那个解析器能处理「字段: 值 + 缩进续行」，apt show / dnf info 同构
         return analyze_pamac(text, translate_info)
+    if dialect == "dnf":
+        return analyze_dnf(text)
+    if dialect == "apt-cache":
+        return analyze_aptcache(text)
+    # pacman 与 `apt search` 结构相同：`名字/仓库 版本 架构` + 缩进描述
     return analyze_pacman(text, translate_info)
 
 
@@ -1752,14 +1834,22 @@ def classify(command, argv):
     """返回 (mode, dialect)。
 
     mode:    search | info | other
-    dialect: pacman | pamac | flatpak
+    dialect: pacman | pamac | flatpak | apt | apt-cache | dnf | apt-info | dnf-info
 
     只在搜索/信息类调用上翻译，其余一律原样透传：
-      pacman -Ss / -Qs / -Fs   -> search      (pacman)
-      pacman -Si / -Qi         -> info        (pacman)
-      pamac search / pamac info -> search/info (pamac，子命令语法)
-      flatpak search            -> search      (flatpak，TSV 输出)
-      pacman -Syu / -R / -Slq / pamac install / flatpak run -> other
+
+      pacman -Ss / -Qs / -Fs     -> search   (pacman)
+      pacman -Si / -Qi           -> info     (pacman)
+      pamac search / pamac info  -> search   (pamac，子命令语法)
+      flatpak search             -> search   (flatpak，TSV 输出)
+      apt search                 -> search   (输出结构与 pacman 同形)
+      apt-cache search           -> search   (单行 `名字 - 描述`)
+      apt show                   -> info
+      dnf / yum search           -> search   (TAB 分隔的 `名字.架构`)
+      dnf info                   -> info
+
+    非搜索调用（pacman -Syu、pamac install、flatpak run、apt install、
+    dnf upgrade…）一律 other，走 exec 完全透传。
     注意 -R 的 -s 是 --recursive 不是搜索，所以要求同时出现 S/Q/F。
     """
     base = os.path.basename(command or "")
@@ -1775,6 +1865,27 @@ def classify(command, argv):
         if action in PAMAC_SUBCOMMANDS:
             return ("search" if action == "search" else "info"), "pamac"
         return "other", "pamac"
+    if base in ("apt", "apt-get"):
+        action = _first_action(argv)
+        if action == "search":
+            return "search", "apt"
+        if action in ("show", "info"):
+            return "info", "apt-info"
+        return "other", "apt"
+    if base == "apt-cache":
+        action = _first_action(argv)
+        if action == "search":
+            return "search", "apt-cache"
+        if action == "show":
+            return "info", "apt-info"
+        return "other", "apt-cache"
+    if base in ("dnf", "yum", "microdnf"):
+        action = _first_action(argv)
+        if action == "search":
+            return "search", "dnf"
+        if action in ("info", "show"):
+            return "info", "dnf-info"
+        return "other", "dnf"
     return _classify_pacman(argv), "pacman"
 
 
