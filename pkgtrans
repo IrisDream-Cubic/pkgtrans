@@ -2255,6 +2255,22 @@ def color_status(st: Settings):
                    "或加 --color always 即可上色")
 
 
+def setup_stdio() -> None:
+    """把 stdout / stderr 钉成 UTF-8。
+
+    Windows 上输出被管道接走时，默认编码是系统代码页（cp1252 / cp936 …），
+    打印中文会直接抛 UnicodeEncodeError 把程序弄崩——而「管道接走」正好是
+    CI 和 `xxx | pkgtrans` 的用法。`write_stdout` 本来就写 UTF-8 字节，
+    这里补上 print / eprint 走的那两个流；errors="replace" 保证极端情况下
+    是乱码而不是崩溃。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def enable_ansi() -> None:
     """Windows 10+ 的控制台默认不解析 ANSI 转义序列。
 
@@ -2989,6 +3005,7 @@ def dispatch_subcommand(name: str, rest):
 
 
 def main(argv):
+    setup_stdio()
     enable_ansi()
     # 子命令优先：`pkgtrans setup pamac` 之类不会被当成要包装的命令
     if argv and argv[0] in SUBCOMMANDS:
@@ -3092,9 +3109,20 @@ def main(argv):
 
 if __name__ == "__main__":
     try:
-        sys.exit(main(sys.argv[1:]))
+        # 先 flush 再 exit：不这么做的话，`pkgtrans setup | head` 这种下游提前关闭
+        # 的情况会到解释器关闭时才在 flush 里抛 BrokenPipe，报 "Exception ignored"
+        # 并以 120 退出（脚本里拿退出码判断就会误判成失败）。
+        code = main(sys.argv[1:])
+        sys.stdout.flush()
+        sys.exit(code)
     except KeyboardInterrupt:
         eprint(f"\n{PROG}: 已中断")
         sys.exit(130)
     except BrokenPipeError:
+        # 把 stdout 换成 /dev/null，避免关闭时再 flush 一次又报错
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except OSError:
+            pass
         sys.exit(0)

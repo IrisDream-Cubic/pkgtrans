@@ -895,8 +895,15 @@ if "search" in argv:
     # 版本号「默认值」这条链路也要验：曾经因为 ROOT 的赋值排在 VERSION 之后，
     # 不带参数打出来的 tarball 叫 pkgtrans-.tar.gz（build-all.sh 显式传了版本，
     # 所以平时看不出来）。
-    if subprocess.run(["git", "-C", repo, "rev-parse", "--git-dir"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    # 注意 rpmbuild 的 %check 里没有 git（Fedora 容器只装了 rpm-build + python3），
+    # 所以这里要容忍 git 不存在，否则整份自测直接崩。
+    try:
+        have_git = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--git-dir"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except (FileNotFoundError, OSError):
+        have_git = False
+    if have_git:
         tarball_dir = tempfile.mkdtemp(prefix="pkgtrans-tarball-")
         subprocess.run(["sh", os.path.join(repo, "packaging", "build-source-tarball.sh"),
                         "", tarball_dir],
