@@ -892,6 +892,19 @@ if "search" in argv:
     check("README 里的包名版本与主程序一致",
           readme_vers and readme_vers == {found["pkgtrans"]}, str(readme_vers))
 
+    # 版本号「默认值」这条链路也要验：曾经因为 ROOT 的赋值排在 VERSION 之后，
+    # 不带参数打出来的 tarball 叫 pkgtrans-.tar.gz（build-all.sh 显式传了版本，
+    # 所以平时看不出来）。
+    if subprocess.run(["git", "-C", repo, "rev-parse", "--git-dir"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        tarball_dir = tempfile.mkdtemp(prefix="pkgtrans-tarball-")
+        subprocess.run(["sh", os.path.join(repo, "packaging", "build-source-tarball.sh"),
+                        "", tarball_dir],
+                       cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        names = os.listdir(tarball_dir)
+        check("不带参数打源码包时版本号能从主程序读出来",
+              f"pkgtrans-{found['pkgtrans']}.tar.gz" in names, str(names))
+
     # ---------- 23. 平台感知 ----------
     print("[23] 平台感知：只显示本平台的包管理器")
     no_bin = tempfile.mkdtemp(prefix="pkgtrans-nopath-")

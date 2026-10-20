@@ -8,9 +8,11 @@
 
 set -eu
 
+# ROOT 必须先算出来——下面的版本号默认值要用它去读主程序。
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION="${1:-$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$ROOT/pkgtrans" | head -1)}"
 OUT="${2:-dist}"
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+[ -n "$VERSION" ] || { echo "读不到版本号（$ROOT/pkgtrans）" >&2; exit 1; }
 NAME="pkgtrans-$VERSION"
 
 mkdir -p "$OUT"
