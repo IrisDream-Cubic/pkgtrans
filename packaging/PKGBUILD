@@ -1,15 +1,18 @@
 # Maintainer: Toru Momose <iris@iris-dream.top>
 pkgname=pkgtrans
-pkgver=1.1
+pkgver=1.2
 pkgrel=1
 pkgdesc="用 AI 翻译 pacman / yay / paru / pamac / flatpak 搜索结果的描述文字"
 arch=('any')
 url="https://github.com/IrisDream-Cubic/pkgtrans"
 license=('MIT')
 depends=('python')
+# 只列 Arch 上真实存在的命令；apt/dnf/brew/winget 的说明在 README 里，
+# 放进 optdepends 只会让 pacman 关系解析出「找不到这个包」的警告。
 optdepends=(
   'pacman: 翻译 pacman -Ss / -Si 的结果'
   'yay: 翻译 yay -Ss 的结果'
+  'paru: 翻译 paru -Ss 的结果'
   'pamac: 翻译 pamac search / pamac info 的结果'
   'flatpak: 翻译 flatpak search 的结果'
 )

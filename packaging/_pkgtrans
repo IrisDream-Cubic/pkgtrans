@@ -16,6 +16,7 @@ _pkgtrans() {
     'keyunlock:解锁，失败时自动切换备用'
     'setup:为包管理器启用翻译'
     'putes:取消某个包管理器的翻译'
+    'install-winget:Windows 上自动安装 winget'
     'on:全局开启'
     'off:全局关闭'
     'clear-cache:清空翻译缓存'
@@ -35,7 +36,7 @@ _pkgtrans() {
       ;;
     setup|putes|putesy|unsetup)
       local -a managers
-      managers=(all pacman yay paru pamac flatpak apt apt-cache dnf yum)
+      managers=(all pacman yay paru pamac flatpak apt apt-cache dnf yum zypper brew winget)
       _describe -t managers '包管理器' managers
       ;;
     keyprefer|keyremove)

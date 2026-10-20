@@ -192,6 +192,10 @@ def run(args, stdin=None, env_extra=None, cache_file=None, style="openai",
         # 把 shell 钉死成 zsh。不钉的话，跑测试的机器是 bash（GitHub runner 就是），
         # pkgtrans 会正确地往 ~/.bashrc 写，而测试却在读 ~/.zshrc —— 假失败。
         "SHELL": "/usr/bin/zsh",
+        # 平台也钉死成 arch：这组用例测的是 pacman / pamac / flatpak 的集成，
+        # 在 Ubuntu runner 上按真实平台走会被**正确地**拒绝（那里没有 pamac）。
+        # 其它平台的过滤行为在 [23] 里用 PSTRANS_PLATFORM 单独测。
+        "PSTRANS_PLATFORM": "arch",
         "no_proxy": "127.0.0.1,localhost",
         "NO_PROXY": "127.0.0.1,localhost",
     })
@@ -887,6 +891,110 @@ if "search" in argv:
     readme_vers = set(re.findall(r"pkgtrans[-_](\d+\.\d+)", readme))
     check("README 里的包名版本与主程序一致",
           readme_vers and readme_vers == {found["pkgtrans"]}, str(readme_vers))
+
+    # ---------- 23. 平台感知 ----------
+    print("[23] 平台感知：只显示本平台的包管理器")
+    no_bin = tempfile.mkdtemp(prefix="pkgtrans-nopath-")
+    # 给一个只含 python3 的 PATH：既能模拟「什么都没装」的干净机器，
+    # 又不至于让脚本自己的 `#!/usr/bin/env python3` 都找不到解释器。
+    try:
+        os.symlink(os.path.realpath(sys.executable), os.path.join(no_bin, "python3"))
+    except OSError:
+        no_bin = None      # 造不出来就退回真实 PATH，这几条断言会宽松些
+
+    def table_rows(out):
+        rows = []
+        for line in plain(out).splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in mod.KNOWN_MANAGERS:
+                rows.append(parts[0])
+        return rows
+
+    for plat, want in (
+        ("debian",  ["apt", "apt-cache", "flatpak"]),
+        ("fedora",  ["dnf", "yum", "flatpak"]),
+        ("macos",   ["brew", "flatpak"]),
+        ("windows", ["winget", "flatpak"]),
+        ("suse",    ["zypper", "flatpak"]),
+        ("arch",    ["pacman", "yay", "paru", "pamac", "flatpak"]),
+    ):
+        reset("http500")
+        # PATH 清空，模拟「什么都没装」的干净机器，避免本机装了别的命令干扰
+        code, out, err = run(["setup"], env_extra={"PSTRANS_PLATFORM": plat,
+                                                  "PATH": no_bin}, **common)
+        got = table_rows(out)
+        check(f"{plat}：表格只列 {', '.join(want)}", got == want, f"实际 {got}")
+        check(f"{plat}：说明里点出当前系统", mod.PLATFORM_LABELS[plat] in err,
+              f"{err!r}"[:200])
+
+    code, out, err = run(["setup", "brew"],
+                         env_extra={"PSTRANS_PLATFORM": "debian", "PATH": no_bin}, **common)
+    check("debian 上 setup brew 被明确拒绝（并说明它属于 macOS）",
+          code == 1 and "属于" in err and "macOS" in err, f"code={code} {err!r}"[:220])
+
+    code, out, err = run(["setup", "apt"],
+                         env_extra={"PSTRANS_PLATFORM": "debian", "PATH": no_bin}, **common)
+    check("debian 上 setup apt 可以接管", code == 0 and "已接管" in err,
+          f"code={code} {err!r}"[:220])
+
+    # ---------- 24. Homebrew ----------
+    print("[24] Homebrew 方言")
+    BREW_INFO = ("==> neovim: stable 0.12.6 (bottled), HEAD\n"
+                 "Ambitious Vim-fork focused on extensibility and agility\n"
+                 "https://neovim.io/\n"
+                 "Aliases: nvim\n"
+                 "License: Apache-2.0\n"
+                 "==> Dependencies\n"
+                 "Required (7): libuv, lpeg\n")
+    reset()
+    code, out, err = run(["--color", "always"], stdin=BREW_INFO.encode())
+    check("brew info：描述行（紧跟 ==>) 被翻译",
+          f"{RED}【译】Ambitious Vim-fork focused on extensibility and agility{RST}" in out,
+          f"{out!r}"[:260])
+    body = plain(out)
+    check("brew info：Aliases / License 没被误当成描述",
+          "Aliases: nvim" in body and "License: Apache-2.0" in body, f"{body!r}"[:260])
+
+    BREW_DESC = ("==> Formulae\n"
+                 "bob: Version manager for neovim\n"
+                 "neovim-qt: Neovim GUI, in Qt\n"
+                 "\n"
+                 "==> Casks\n"
+                 "neovide: No Nonsense Neovim Client in Rust\n")
+    reset()
+    code, out, err = run(["--color", "always"], stdin=BREW_DESC.encode())
+    check("brew search --desc：只翻冒号后的描述，包名保留",
+          f"bob: {RED}【译】Version manager for neovim{RST}" in out, f"{out!r}"[:260])
+    check("brew search --desc：Casks 段同样处理",
+          f"neovide: {RED}【译】No Nonsense Neovim Client in Rust{RST}" in out,
+          f"{out!r}"[:260])
+
+    # ---------- 25. winget ----------
+    print("[25] winget 方言")
+    WINGET_SHOW = ("Found Neovim [Neovim.Neovim]\n"
+                   "Version: 0.12.6\n"
+                   "Publisher: Neovim\n"
+                   "Description: Vim-fork focused on extensibility and usability\n"
+                   "License: Apache-2.0 AND Vim AND MIT\n")
+    reset()
+    code, out, err = run(["--color", "always"], stdin=WINGET_SHOW.encode())
+    check("winget show：只翻 Description",
+          f"Description: {RED}【译】Vim-fork focused on extensibility and usability{RST}"
+          in out, f"{out!r}"[:280])
+    check("winget show：Publisher / License 原样",
+          "Publisher: Neovim" in plain(out) and "License: Apache-2.0 AND Vim AND MIT" in plain(out),
+          f"{out!r}"[:280])
+
+    WINGET_SEARCH = ("Name      Id              Version  Source\n"
+                     "----------------------------------------\n"
+                     "Neovim    Neovim.Neovim   0.12.6   winget\n")
+    reset()
+    code, out, err = run([], stdin=WINGET_SEARCH.encode())
+    check("winget search：没有描述列 -> 逐字节原样", out == WINGET_SEARCH, f"{out!r}"[:200])
+
+    code, out, err = run(["install-winget"], **common)
+    check("install-winget 在非 Windows 上明确拒绝（并指路本平台的命令）",
+          code == 1 and "Windows" in err, f"code={code} {err!r}"[:220])
 
     print()
     print("=" * 62)

@@ -7,7 +7,7 @@ _pkgtrans_completions() {
   if [ "$COMP_CWORD" -eq 1 ]; then
     COMPREPLY=( $(compgen -W "help info check status aim keyadd keylist keyprefer \
 keyremove keylock keyunlock setup putes putesy unsetup on off clear-cache \
-show-config install-shell uninstall-shell" -- "$cur") )
+show-config install-shell uninstall-shell install-winget" -- "$cur") )
     return
   fi
 
@@ -17,7 +17,7 @@ show-config install-shell uninstall-shell" -- "$cur") )
 fr-latn de-latn ru-cyrl" -- "$cur") )
       ;;
     setup|putes|putesy|unsetup)
-      COMPREPLY=( $(compgen -W "all pacman yay paru pamac flatpak apt apt-cache dnf yum" -- "$cur") )
+      COMPREPLY=( $(compgen -W "all pacman yay paru pamac flatpak apt apt-cache dnf yum zypper brew winget" -- "$cur") )
       ;;
     keyprefer|keyremove)
       COMPREPLY=( $(compgen -W "$(pkgtrans keylist 2>/dev/null |

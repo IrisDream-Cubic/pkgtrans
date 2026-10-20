@@ -37,32 +37,146 @@ import concurrent.futures as cf
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
+import zipfile
 
-__version__ = "1.1"
+__version__ = "1.2"
 DEVELOPER = "Toru Momose"
 DEVELOPER_URL = "https://iris-dream.top"
 BUILT_WITH = "DeepSeek v4 Pro"
 
 PROG = "pkgtrans"
-DEFAULT_CONFIG_PATH = "~/.config/pkgtrans/config"
-DEFAULT_CACHE_PATH = "~/.cache/pkgtrans/cache.json"
-DEFAULT_KEYS_PATH = "~/.config/pkgtrans/keys.json"
-STATE_PATH = "~/.config/pkgtrans/state.json"
+
+
+def _default_dirs():
+    """配置 / 缓存的默认位置。
+
+    Windows 按惯例放 %APPDATA% / %LOCALAPPDATA%，其它系统按 XDG。
+    这样 Windows 用户的配置在 %APPDATA%\\pkgtrans 下，而不是家目录里
+    凭空多出一个 .config。
+    """
+    if os.name == "nt":
+        conf = os.environ.get("APPDATA") or os.path.expanduser("~")
+        cache = os.environ.get("LOCALAPPDATA") or conf
+    else:
+        conf = (os.environ.get("XDG_CONFIG_HOME")
+                or os.path.join(os.path.expanduser("~"), ".config"))
+        cache = (os.environ.get("XDG_CACHE_HOME")
+                 or os.path.join(os.path.expanduser("~"), ".cache"))
+    return os.path.join(conf, PROG), os.path.join(cache, PROG)
+
+
+CONFIG_DIR, CACHE_DIR = _default_dirs()
+
+DEFAULT_CONFIG_PATH = os.path.join(CONFIG_DIR, "config")
+DEFAULT_CACHE_PATH = os.path.join(CACHE_DIR, "cache.json")
+DEFAULT_KEYS_PATH = os.path.join(CONFIG_DIR, "keys.json")
+STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
 SHELL_BEGIN = "# >>> pkgtrans >>>"
 SHELL_END = "# <<< pkgtrans <<<"
 
-# 可以接管的包管理器
-KNOWN_MANAGERS = ["pacman", "yay", "paru", "pamac", "flatpak",
-                  "apt", "apt-cache", "dnf", "yum"]
+# 可以接管的包管理器 -> (适用平台, 典型用法)
+# 「适用平台」决定它会不会出现在 setup 表格里、能不能被 setup 接管：
+# Debian 上列 pacman/yay 只会误导人，Arch 上列 winget 也一样。
+MANAGER_META = {
+    "pacman":    ("arch",    "pacman -Ss / -Si"),
+    "yay":       ("arch",    "yay -Ss"),
+    "paru":      ("arch",    "paru -Ss"),
+    "pamac":     ("arch",    "pamac search / info"),
+    "apt":       ("debian",  "apt search / show"),
+    "apt-cache": ("debian",  "apt-cache search"),
+    "dnf":       ("fedora",  "dnf search / info"),
+    "yum":       ("fedora",  "yum search"),
+    "zypper":    ("suse",    "zypper search"),
+    "brew":      ("macos",   "brew info"),
+    "winget":    ("windows", "winget show"),
+    "flatpak":   ("any",     "flatpak search"),
+}
+KNOWN_MANAGERS = list(MANAGER_META)
+
+PLATFORM_LABELS = {
+    "arch":    "Arch 系（Arch / Manjaro / EndeavourOS …）",
+    "debian":  "Debian 系（Debian / Ubuntu / Mint …）",
+    "fedora":  "Fedora 系（Fedora / RHEL / Rocky …）",
+    "suse":    "openSUSE",
+    "macos":   "macOS",
+    "windows": "Windows",
+    "linux":   "Linux（未识别的发行版）",
+}
+
+_PLATFORM_CACHE = []
+
+
+def current_platform() -> str:
+    """当前系统属于哪一支：arch / debian / fedora / suse / macos / windows / linux。
+
+    只用来决定「哪些包管理器值得显示和接管」，判断错了也只影响展示，
+    所以用 /etc/os-release 的 ID + ID_LIKE 就够，不引第三方库。
+    可用 PSTRANS_PLATFORM 覆盖（比如 WSL 里想按 arch 看，或者在 CI 里
+    让行为与跑测试的机器无关）。
+    """
+    forced = os.environ.get("PSTRANS_PLATFORM", "").strip().lower()
+    if forced in PLATFORM_LABELS:
+        return forced
+    if _PLATFORM_CACHE:
+        return _PLATFORM_CACHE[0]
+    if os.name == "nt":
+        plat = "windows"
+    elif sys.platform == "darwin":
+        plat = "macos"
+    else:
+        info = {}
+        try:
+            with open("/etc/os-release", encoding="utf-8") as fh:
+                for line in fh:
+                    if "=" in line:
+                        key, value = line.rstrip("\n").split("=", 1)
+                        info[key] = value.strip().strip('"').lower()
+        except OSError:
+            pass
+        ids = {info.get("ID", "")} | set(info.get("ID_LIKE", "").split())
+        ids.discard("")
+        if ids & {"arch", "manjaro", "endeavouros", "garuda", "cachyos", "artix"}:
+            plat = "arch"
+        elif ids & {"debian", "ubuntu", "linuxmint", "pop", "kali",
+                    "raspbian", "elementary", "zorin", "deepin"}:
+            plat = "debian"
+        elif ids & {"fedora", "rhel", "centos", "rocky", "almalinux",
+                    "ol", "amzn", "nobara"}:
+            plat = "fedora"
+        elif ids & {"opensuse", "opensuse-leap", "opensuse-tumbleweed",
+                    "suse", "sles", "sled"}:
+            plat = "suse"
+        else:
+            plat = "linux"
+    _PLATFORM_CACHE.append(plat)
+    return plat
+
+
+def platform_managers(plat=None):
+    """当前平台上适用的包管理器（flatpak 各平台都有）。"""
+    plat = plat or current_platform()
+    return [m for m, (p, _) in MANAGER_META.items() if p in (plat, "any")]
+
+
+def visible_managers():
+    """表格里显示哪些：本平台适用的 + 虽不适用但确实装了的。
+
+    后者照顾手动装了别家包管理器的人（比如 WSL 里装了 pacman），
+    不至于因为「平台不符」被藏起来。
+    """
+    here = set(platform_managers())
+    return [m for m in KNOWN_MANAGERS if m in here or shutil.which(m)]
 
 # 翻译成功 -> 红色；失败 -> 黄色
 ESC = "\033["
@@ -219,6 +333,11 @@ def banner(text: str = "PKGTRANS") -> str:
 # --------------------------------------------------------------------------
 
 def eprint(*args, **kwargs):
+    # 先把 stdout 冲掉，否则输出被管道接走时（stdout 变块缓冲）提示会跑到结果前面
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
     kwargs.setdefault("file", sys.stderr)
     kwargs.setdefault("flush", True)
     print(*args, **kwargs)
@@ -687,7 +806,9 @@ HELP = f"""\
   keylock             锁定：只用优先 Key，不自动切换
   keyunlock           解锁：优先 Key 失败时自动切换备用
   setup [包管理器…]   为包管理器启用翻译（不带参数=查看状态，all=全部）
+                      只列出本平台适用的命令，比如 Debian 上不会出现 yay
   putes [包管理器…]   取消（setup 反过来写；unsetup 同义）
+  install-winget      仅 Windows：没装 winget 时自动下载安装官方 App Installer
   on / off            全局开启 / 关闭
   clear-cache         清空翻译缓存
   show-config         显示最终生效的配置
@@ -704,8 +825,8 @@ HELP = f"""\
   --max-items <N>     单次最多翻译多少条（默认 300，0 = 不限）
   --timeout <秒>      单次请求超时（默认 30）
   --retries <N>       失败重试次数（默认 2）
-  --dialect <格式>    auto | pacman | pamac | flatpak | apt | apt-cache | dnf
-                      （仅管道模式需要；auto 会自动认）
+  --dialect <格式>    auto | pacman | pamac | flatpak | apt | apt-cache | dnf |
+                      brew | info（仅管道模式需要；auto 会自动认）
   --no-cache          本次不使用缓存
   --no-info           不翻译 -Si / -Qi 的 Description 字段
   --bilingual         译文后附上灰色原文
@@ -1014,6 +1135,51 @@ def analyze_aptcache(text: str):
     return segments
 
 
+# brew info 的包头：`==> 名字: 版本 …`
+BREW_INFO_HEADER_RE = re.compile(r"^==> (?P<name>[^:]+): \S")
+# brew search --desc 的一行：`名字: 描述`
+BREW_DESC_RE = re.compile(r"^(?P<name>[A-Za-z0-9@._+-]+): (?P<desc>\S.*)$")
+BREW_SECTION_RE = re.compile(r"^==>\s+(Formulae|Casks)\s*$")
+
+
+def analyze_brew(text: str):
+    """Homebrew 的两种输出。
+
+    ``brew info``：描述是紧跟在 ``==> 名字: 版本 …`` **后面那一行**，没有字段名。
+    ``brew search --desc``：每行 ``名字: 描述``，分 Formulae / Casks 两段。
+    不带 --desc 的 ``brew search`` 只列包名，没有可翻的东西。
+
+    注意 ``Aliases: nvim`` / ``License: Apache-2.0`` 也是 ``名字: 值`` 的形状，
+    所以 ``名字: 描述`` 这条规则只在 Formulae / Casks 段里生效。
+    """
+    segments = []
+    expect_desc = False
+    in_search = False
+    for line in text.split("\n"):
+        plain = ANSI_RE.sub("", line)
+        if BREW_SECTION_RE.match(plain):
+            in_search, expect_desc = True, False
+            segments.append(Segment("", line, KIND_OTHER))
+            continue
+        if plain.startswith("==>"):
+            in_search = False
+            expect_desc = bool(BREW_INFO_HEADER_RE.match(plain))
+            segments.append(Segment("", line, KIND_OTHER))
+            continue
+        if expect_desc:
+            expect_desc = False
+            if plain.strip():
+                segments.append(Segment("", line, KIND_DESC))
+                continue
+        if in_search:
+            m = BREW_DESC_RE.match(plain)
+            if m:
+                segments.append(Segment(m.group("name") + ": ", m.group("desc"), KIND_DESC))
+                continue
+        segments.append(Segment("", line, KIND_OTHER))
+    return segments
+
+
 def detect_dialect(text: str) -> str:
     """管道模式下猜测输出是哪家的。"""
     lines = text.split("\n")[:300]
@@ -1024,6 +1190,11 @@ def detect_dialect(text: str) -> str:
     for line in lines:
         if DNF_LINE_RE.match(ANSI_RE.sub("", line)):
             return "dnf"
+    # Homebrew：`==> Formulae` / `==> Casks` 段头，或 `==> 名字: 版本`
+    for line in lines:
+        plain = ANSI_RE.sub("", line)
+        if BREW_SECTION_RE.match(plain) or BREW_INFO_HEADER_RE.match(plain):
+            return "brew"
     for line in lines:
         plain = ANSI_RE.sub("", line).rstrip()
         if plain and not plain[:1].isspace():
@@ -1057,6 +1228,8 @@ def analyze(text: str, translate_info: bool, dialect: str = "pacman", columns=No
         return analyze_dnf(text)
     if dialect == "apt-cache":
         return analyze_aptcache(text)
+    if dialect == "brew":
+        return analyze_brew(text)
     # pacman 与 `apt search` 结构相同：`名字/仓库 版本 架构` + 缩进描述
     return analyze_pacman(text, translate_info)
 
@@ -1609,6 +1782,8 @@ def shell_targets(st: Settings):
 
 def shell_snippet(shell: str, targets) -> str:
     targets = list(targets)
+    if shell == "powershell":
+        return _powershell_snippet(targets)
     lines = [
         SHELL_BEGIN,
         "# 让这些命令的搜索结果自动经 AI 翻译：",
@@ -1627,6 +1802,22 @@ def shell_snippet(shell: str, targets) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _powershell_snippet(targets) -> str:
+    """Windows 的写法：PowerShell 函数 + 显式 exe 路径（不能用 $HOME/.local/bin）。"""
+    exe = program_path().replace("'", "''")     # PowerShell 单引号里 '' 是转义
+    lines = [
+        SHELL_BEGIN,
+        "# 让这些命令的搜索结果自动经 AI 翻译：",
+        f"#   {', '.join(targets) if targets else '(空，用 pkgtrans setup 添加)'}",
+        "# 其他子命令（install、upgrade…）原样透传，行为完全不变。",
+        f"# 由 `{PROG} setup` 写入，删除本段或用 `{PROG} putes` 即可卸载。",
+    ]
+    for name in targets:
+        lines.append(f"function global:{name} {{ & '{exe}' {name} @args }}")
+    lines.append(SHELL_END)
+    return "\n".join(lines) + "\n"
+
+
 def strip_block(text: str) -> str:
     pattern = re.compile(
         re.escape(SHELL_BEGIN) + r".*?" + re.escape(SHELL_END) + r"\n?",
@@ -1636,7 +1827,45 @@ def strip_block(text: str) -> str:
 
 
 def rc_path_for(shell: str) -> str:
+    if shell == "powershell":
+        return powershell_profile()
     return expand("~/.zshrc" if shell != "bash" else "~/.bashrc")
+
+
+def powershell_profile() -> str:
+    """PowerShell 的 $PROFILE 位置。
+
+    PowerShell 7 和 Windows PowerShell 5.1 用的目录不一样，已存在的优先，
+    都没有就按 7 的路径建（新装机器上基本是 7）。
+    """
+    home = os.path.expanduser("~")
+    leaf = "Microsoft.PowerShell_profile.ps1"
+    candidates = [
+        os.path.join(home, "Documents", "PowerShell", leaf),
+        os.path.join(home, "Documents", "WindowsPowerShell", leaf),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
+def program_path() -> str:
+    """当前程序自己的可执行路径，写进 shell 片段里用。
+
+    PyInstaller 打的 exe 里 sys.frozen 为真，sys.executable 就是 exe 本身；
+    普通脚本取 argv[0] 的真实路径（可能是软链，realpath 一下）。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.realpath(sys.executable)
+    raw = sys.argv[0] or ""
+    if raw and raw != "-" and os.path.exists(raw):
+        return os.path.realpath(raw)
+    found = shutil.which(PROG)
+    if found:
+        return os.path.realpath(found)
+    here = globals().get("__file__")
+    return os.path.realpath(here) if here else PROG
 
 
 def terminal_name() -> str:
@@ -1668,7 +1897,8 @@ def require_shell():
     """拿到可用的 shell 名；不支持时给出明确提示并返回 None。"""
     shell = guess_shell()
     if not shell:
-        fail(f"不支持 $SHELL={os.environ.get('SHELL') or '(空)'}，目前只会写 zsh / bash 的配置")
+        fail(f"不支持 $SHELL={os.environ.get('SHELL') or '(空)'}，目前只会写 "
+             f"zsh / bash（Windows 上是 PowerShell）的配置")
         note(f"可以用 `{PROG} --shell-init zsh` 看片段，手动加到你的 shell 配置里")
         return None
     return shell
@@ -1724,11 +1954,14 @@ def uninstall_shell(shell: str, quiet=False):
 def guess_shell() -> str:
     """判断该往哪个 rc 文件写。
 
-    先看 $SHELL；它没设、或指向 zsh/bash 之外的 shell 时，退回 /etc/passwd 里
-    登记的**登录 shell**——CI runner 和容器里 $SHELL 经常是 /bin/sh，
-    只看它会把环境误判成「不支持」而拒绝写配置。
+    Windows 走 PowerShell 的 $PROFILE（没有 .zshrc 这回事）。
+    其它系统先看 $SHELL；它没设、或指向 zsh/bash 之外的 shell 时，退回
+    /etc/passwd 里登记的**登录 shell**——CI runner 和容器里 $SHELL 经常是
+    /bin/sh，只看它会把环境误判成「不支持」而拒绝写配置。
     两个来源都不是 zsh/bash 才真的返回空。
     """
+    if os.name == "nt":
+        return "powershell"
     candidates = [os.environ.get("SHELL", "")]
     try:
         import pwd
@@ -1886,6 +2119,22 @@ def classify(command, argv):
         if action in ("info", "show"):
             return "info", "dnf-info"
         return "other", "dnf"
+    if base in ("brew", "brew.rb"):
+        if any(a in ("--json", "-j") for a in argv):
+            return "other", "brew"          # 机器可读格式不碰
+        action = _first_action(argv)
+        if action == "search":
+            return "search", "brew"
+        if action in ("info", "desc"):
+            return "info", "brew"
+        return "other", "brew"
+    if base in ("winget", "winget.exe"):
+        action = _first_action(argv)
+        # winget search 只有 Name/Id/Version/Match/Source 五列，没有描述可翻；
+        # 真正带 Description 的是 winget show。
+        if action in ("show", "view"):
+            return "info", "info"
+        return "other", "winget"
     return _classify_pacman(argv), "pacman"
 
 
@@ -2004,6 +2253,26 @@ def color_status(st: Settings):
         return True, "输出是终端"
     return False, ("输出是管道/文件（正常行为）。终端里直接运行、"
                    "或加 --color always 即可上色")
+
+
+def enable_ansi() -> None:
+    """Windows 10+ 的控制台默认不解析 ANSI 转义序列。
+
+    不打开 VT 处理的话，翻译成功的红色会原样打成 `←[31m...`，
+    比没颜色更难受。其它平台什么都不做。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        for handle_id in (-11, -12):          # STD_OUTPUT_HANDLE / STD_ERROR_HANDLE
+            handle = kernel32.GetStdHandle(handle_id)
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass                                  # 重定向到文件 / 老系统：忽略
 
 
 def want_color(st: Settings) -> bool:
@@ -2406,11 +2675,17 @@ def _pad(text, width):
 
 def _print_manager_table(st: Settings):
     active = set(shell_targets(st))
+    shown = visible_managers()
+    plat = current_platform()
     print(f"  {_pad('包管理器', 12)}{_pad('已安装', 8)}{_pad('已接管', 8)}")
-    for name in KNOWN_MANAGERS:
+    for name in shown:
         installed = shutil.which(name) is not None
         print(f"  {_pad(name, 12)}{_pad('✓' if installed else '-', 8)}"
               f"{'✓' if name in active else '-'}")
+    note(f"当前系统：{PLATFORM_LABELS.get(plat, plat)}")
+    hidden = [m for m in KNOWN_MANAGERS if m not in shown]
+    if hidden:
+        note(f"其它平台的命令不列出：{', '.join(hidden)}")
     note(f"`{PROG} setup <名字…>` 接管 / `{PROG} putes <名字…>` 取消（all = 全部）")
     note(f"接管项改动需 {_restart_hint()}；语言 / 密钥 / 开关是立即生效的")
 
@@ -2419,6 +2694,9 @@ def _restart_hint() -> str:
     """「怎么让新的 shell 集成生效」的一句话，把窗口和 shell 两层的名字都点出来。"""
     shell = guess_shell() or "zsh"
     term = terminal_name()
+    if shell == "powershell":
+        where = f"新开一个 {term} 窗口" if term else "新开一个 PowerShell 窗口"
+        return where
     where = f"新开一个 {term} 窗口" if term else "新开一个终端窗口"
     return f"{where}或 `exec {shell}` 后生效"
 
@@ -2427,7 +2705,7 @@ def _write_targets(st: Settings, targets) -> bool:
     # 先落 shell 配置，成功了再写状态，避免失败时留下半改的状态
     shell = guess_shell()
     if not shell:
-        fail(f"不支持 $SHELL={os.environ.get('SHELL')}，只支持 zsh / bash")
+        fail(f"不支持 $SHELL={os.environ.get('SHELL')}，只支持 zsh / bash / PowerShell")
         note("可以手动加一行：function pacman { pkgtrans pacman $argv; }（fish 语法示例）")
         return False
     value = ",".join(targets) if targets else "none"
@@ -2459,9 +2737,22 @@ def cmd_setup(st: Settings, args) -> int:
         _print_manager_table(st)
         return 0
     names = _resolve_manager_args(args)
-    unknown = [n for n in names if n not in KNOWN_MANAGERS]
+    unknown = [n for n in names if n not in MANAGER_META]
     if unknown:
         warn(f"不在已知列表里，仍会照写：{', '.join(unknown)}")
+    # 平台不对的命令拒绝接管：在 Debian 上写一个 yay() 函数，只会得到一个
+    # 永远找不到可执行文件的死包装，比直接报错更让人困惑。
+    shown = set(visible_managers())
+    stranger = [n for n in names if n in MANAGER_META and n not in shown]
+    if stranger:
+        plat = current_platform()
+        for name in stranger:
+            owner = MANAGER_META[name][0]
+            fail(f"{name} 属于 {PLATFORM_LABELS.get(owner, owner)}，"
+                 f"当前系统是 {PLATFORM_LABELS.get(plat, plat)}")
+        note(f"本平台可用：{', '.join(platform_managers())}")
+        note("确实装了别家的包管理器？装好之后它就会自动出现在列表里")
+        return 1
     current = shell_targets(st)
     added = [n for n in names if n not in current]
     if not added:
@@ -2490,6 +2781,138 @@ def cmd_putes(st: Settings, args) -> int:
     return 0 if _write_targets(st, [n for n in current if n not in removed]) else 1
 
 
+# ------------------------------------------------------ winget 自举（Windows）
+
+WINGET_RELEASE_API = "https://api.github.com/repos/microsoft/winget-cli/releases/latest"
+WINGET_ASSET_BUNDLE = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+WINGET_ASSET_DEPS = "DesktopAppInstaller_Dependencies.zip"
+
+
+def _download(url, dest, label):
+    """下载到 dest，只在 stderr 是终端时刷进度条（免得污染管道）。"""
+    req = urllib.request.Request(url, headers={"User-Agent": f"{PROG}/{__version__}"})
+    with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as fh:
+        total = int(resp.headers.get("Content-Length") or 0)
+        got = 0
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            fh.write(chunk)
+            got += len(chunk)
+            if total and sys.stderr.isatty():
+                eprint(f"\r  {label} {got * 100 // total}%"
+                       f"  ({got // 1048576}/{total // 1048576} MiB)", end="")
+    if sys.stderr.isatty():
+        eprint("\r" + " " * 64 + "\r", end="")
+    return dest
+
+
+def _pick_winget_asset(assets, name):
+    for asset in assets:
+        if asset.get("name") == name:
+            return asset.get("browser_download_url")
+    return None
+
+
+def _add_appx(path) -> bool:
+    """用 PowerShell 的 Add-AppxPackage 装一个 .appx / .msixbundle。"""
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+         f"Add-AppxPackage -Path '{path}' -ErrorAction Stop"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    if proc.returncode != 0:
+        fail(f"Add-AppxPackage 失败：{os.path.basename(path)}")
+        text = proc.stdout.decode("utf-8", "replace").strip()
+        if text:
+            eprint(text[:800])
+        return False
+    return True
+
+
+def cmd_install_winget(st: Settings, rest) -> int:
+    """给没有 winget 的 Windows 机器装上 winget（App Installer）。
+
+    走官方 release：先装依赖框架包，再装 msixbundle。Windows Server / LTSC
+    上没有 Microsoft Store，只能这么装。
+    """
+    if os.name != "nt":
+        fail(f"winget 是 Windows 的包管理器，`{PROG} install-winget` 只在 Windows 上可用")
+        note(f"其它系统用本平台自己的：{', '.join(platform_managers())}")
+        return 1
+
+    found = shutil.which("winget")
+    if found:
+        ok(f"已经装了：{found}")
+        return 0
+
+    machine = (platform.machine() or "").lower()
+    # GitHub 那边的依赖包按架构分文件，取本机这一份
+    want = {"amd64": "x64", "x86": "x86", "arm64": "arm64", "arm": "arm"}.get(machine, "x64")
+    eprint(f"  没找到 winget，准备安装官方 App Installer（{want} 架构）")
+    note("从 microsoft/winget-cli 的最新 release 下载，约 300 MiB")
+
+    tmp = tempfile.mkdtemp(prefix="pkgtrans-winget-")
+    try:
+        req = urllib.request.Request(
+            WINGET_RELEASE_API,
+            headers={"User-Agent": f"{PROG}/{__version__}",
+                     "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            release = json.loads(resp.read().decode("utf-8"))
+        tag = release.get("tag_name") or "?"
+        assets = release.get("assets") or []
+        bundle_url = _pick_winget_asset(assets, WINGET_ASSET_BUNDLE)
+        deps_url = _pick_winget_asset(assets, WINGET_ASSET_DEPS)
+        if not bundle_url:
+            fail(f"{tag} 里找不到 {WINGET_ASSET_BUNDLE}，上游可能改了资产命名")
+            note(f"手动下载：https://github.com/microsoft/winget-cli/releases/tag/{tag}")
+            return 1
+        eprint(f"  版本：{tag}")
+
+        packages = []
+        if deps_url:
+            zip_path = _download(deps_url, os.path.join(tmp, "deps.zip"), "依赖包")
+            with zipfile.ZipFile(zip_path) as zf:
+                for member in zf.namelist():
+                    low = member.lower()
+                    if not low.endswith((".appx", ".msix")):
+                        continue
+                    # 依赖包里各架构同名，只挑本机的
+                    if want not in low:
+                        continue
+                    out = os.path.join(tmp, os.path.basename(member))
+                    with zf.open(member) as src, open(out, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    packages.append(out)
+            if not packages:
+                warn(f"依赖包里没找到 {want} 架构的框架包，先只装主包试试")
+        bundle_path = _download(bundle_url, os.path.join(tmp, "winget.msixbundle"),
+                                "App Installer")
+        packages.append(bundle_path)
+
+        for path in packages:
+            eprint(f"  安装 {os.path.basename(path)}")
+            if not _add_appx(path):
+                note("可以试试用管理员身份重跑，或用 Microsoft Store 装 App Installer")
+                return 1
+    except (urllib.error.URLError, OSError, ValueError, zipfile.BadZipFile) as exc:
+        fail(f"下载 / 解包失败：{exc}")
+        note("手动下载：https://github.com/microsoft/winget-cli/releases")
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if shutil.which("winget"):
+        ok("winget 装好了")
+    else:
+        warn("装完了，但当前 PATH 里还看不到 winget —— 重开一个窗口再试 `winget --version`")
+    note(f"接着可以跑 `{PROG} setup winget` 让 winget show 自动翻译")
+    return 0
+
+
 # ------------------------------------------------------------------ on/off
 
 def cmd_onoff(st: Settings, enable: bool) -> int:
@@ -2511,6 +2934,7 @@ SUBCOMMANDS = {
     "help", "info", "version", "check", "status",
     "aim", "keylist", "keyadd", "keyremove", "keyprefer", "keylock", "keyunlock",
     "setup", "putes", "putesy", "unsetup",
+    "install-winget",
     "on", "off", "clear-cache", "show-config",
     "install-shell", "uninstall-shell",
 }
@@ -2546,6 +2970,8 @@ def dispatch_subcommand(name: str, rest):
         return cmd_setup(st, rest)
     if name in ("putes", "putesy", "unsetup"):
         return cmd_putes(st, rest)
+    if name == "install-winget":
+        return cmd_install_winget(st, rest)
     if name in ("on", "off"):
         return cmd_onoff(st, name == "on")
     if name == "clear-cache":
@@ -2563,6 +2989,7 @@ def dispatch_subcommand(name: str, rest):
 
 
 def main(argv):
+    enable_ansi()
     # 子命令优先：`pkgtrans setup pamac` 之类不会被当成要包装的命令
     if argv and argv[0] in SUBCOMMANDS:
         return dispatch_subcommand(argv[0], argv[1:])

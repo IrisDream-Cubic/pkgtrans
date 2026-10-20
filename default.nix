@@ -6,7 +6,7 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "pkgtrans";
-  version = "1.1";
+  version = "1.2";
 
   inherit src;
 

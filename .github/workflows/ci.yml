@@ -58,6 +58,7 @@ jobs:
       - name: 在 Arch 容器里 makepkg
         run: |
           mkdir -p out && chmod 777 out
+          VER=$(sed -n 's/^pkgver=//p' packaging/PKGBUILD)
           docker run --rm -v "$PWD:/w" -w /w archlinux:latest bash -c '
             set -e
             pacman -Syu --noconfirm --needed --disable-download-timeout base-devel python git
@@ -65,12 +66,40 @@ jobs:
             git config --global --add safe.directory /w
             mkdir -p /build
             cp packaging/PKGBUILD /build/
-            git archive --format=tar.gz --prefix=pkgtrans-1.0/ -o /build/pkgtrans-1.0.tar.gz HEAD
+            git archive --format=tar.gz --prefix=pkgtrans-'"$VER"'/ -o /build/pkgtrans-'"$VER"'.tar.gz HEAD
             chown -R builder /build
             su builder -s /bin/sh -c "cd /build && makepkg -f --nodeps --noconfirm"
             cp /build/*.pkg.tar.zst /w/out/
           '
           ls -lh out
+
+  windows:
+    name: Windows（exe + winget）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # PyInstaller 不支持交叉编译，exe 只能在 Windows 上打。
+      # 完整自测在 Linux/macOS 上跑（依赖 POSIX 的 .zshrc 和 /bin/sh 假二进制），
+      # 这里跑的是 packaging/windows-smoke.py，专测 Windows 路径。
+      - name: 打单文件 exe
+        run: |
+          pip install --disable-pip-version-check pyinstaller
+          # 脚本没有 .py 后缀，PyInstaller 要一个常规文件名
+          Copy-Item pkgtrans pkgtrans_app.py
+          pyinstaller --onefile --console --name pkgtrans-windows-x64 `
+            --distpath dist --workpath build --specpath build pkgtrans_app.py
+      - name: 冒烟测试
+        run: |
+          Get-Item dist\pkgtrans-windows-x64.exe | Select-Object Name, Length
+          python packaging/windows-smoke.py dist\pkgtrans-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/pkgtrans-windows-x64.exe
+          if-no-files-found: error
 
   nix:
     name: Nix 可构建

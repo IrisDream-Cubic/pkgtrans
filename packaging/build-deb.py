@@ -66,12 +66,13 @@ def install_tree(root: str, version: str):
 def changelog_text(version: str) -> str:
     return f"""pkgtrans ({version}-1) unstable; urgency=medium
 
-  * 支持 apt / apt-cache / dnf / yum / flatpak / pacman / pamac 等 9 个命令
+  * 支持 pacman / yay / paru / pamac / apt / apt-cache / dnf / yum /
+    brew / winget / flatpak 共 12 个命令，并按平台自动过滤
   * 多 API Key 管理与失败自动回退，可锁定为只用一个
   * 目标语言可切换（简体 / 繁體 / 日本語 / 한국어 / 世界语 …）
   * setup / putes 管理 shell 集成，on / off 全局开关
 
- -- {MAINTAINER}  Sun, 11 Oct 2026 12:00:00 +0800
+ -- {MAINTAINER}  Tue, 20 Oct 2026 12:00:00 +0800
 """
 
 
@@ -89,11 +90,12 @@ Section: utils
 Priority: optional
 Homepage: {HOMEPAGE}
 Description: AI translation for package manager search results
- pkgtrans translates the description lines of apt / apt-cache / flatpak
- search results (and pacman / yay / paru / pamac on Arch) with an LLM API.
- Successful translations are shown in red, failed ones fall back to the
- original text in yellow.
+ pkgtrans translates the description lines of apt / apt-cache search,
+ apt show, and flatpak search results with an LLM API. Successful
+ translations are shown in red, failed ones fall back to the original
+ text in yellow.
  Useful when you can read package names but not the English descriptions.
+ On Arch and Fedora it also handles pacman / pamac and dnf / yum.
 """
 
 

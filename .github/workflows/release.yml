@@ -8,7 +8,7 @@ on:
       version:
         description: 版本号（可带或不带 v）
         required: true
-        default: '1.1'
+        default: '1.2'
 
 # 需要 contents: write 才能创建 Release。
 # 注意：仓库设置里若把 Actions 的 Workflow permissions 设成只读，
@@ -179,15 +179,50 @@ jobs:
           env -i ./result/bin/pkgtrans --version > /dev/null
           echo "✓ flake 构建通过，env -i 下也能跑"
 
+  windows:
+    name: Windows exe
+    needs: [version]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # PyInstaller 不能交叉编译，只能在 Windows 上打；打完立刻用
+      # windows-smoke.py 验一遍，免得发出去一个打不开的 exe。
+      - name: 打 exe
+        run: |
+          pip install --disable-pip-version-check pyinstaller
+          Copy-Item pkgtrans pkgtrans_app.py
+          pyinstaller --onefile --console --name pkgtrans-windows-x64 `
+            --distpath out --workpath build --specpath build pkgtrans_app.py
+      - name: 冒烟测试
+        run: python packaging/windows-smoke.py out\pkgtrans-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: out/pkgtrans-windows-x64.exe
+
   release:
     name: 发 Release
-    needs: [version, test, arch, deb, rpm, nix]
+    needs: [version, test, arch, deb, rpm, nix, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # exe 的 sha256 只有打完包才知道，所以 winget 清单在这里现算现生成。
+      # 想发布到 winget 源时，解包提 PR 到 microsoft/winget-pkgs 即可。
+      - name: 生成 winget 清单
+        run: |
+          SHA=$(sha256sum dist/pkgtrans-windows-x64.exe | cut -d' ' -f1)
+          echo "exe sha256 = $SHA"
+          python3 packaging/make-winget-manifest.py \
+            --version "${{ needs.version.outputs.version }}" \
+            --sha256 "$SHA" --outdir out/winget
+          tar -czf "dist/pkgtrans-${{ needs.version.outputs.version }}-winget-manifests.tar.gz" \
+            -C out/winget manifests
       - name: 生成 SHA256SUMS
         run: |
           cd dist

@@ -13,20 +13,28 @@
 - 翻译**成功** → 描述文字显示为 <span style="color:red">**红色**</span>
 - 翻译**失败** → 描述文字显示为 <span style="color:gold">**黄色**</span>（原样回退，绝不影响包管理器本身）
 
-支持 **9 个命令、5 种输出方言**——它们的语法和格式各不相同（旗标式 / 子命令式、
-单行 / 缩进 / 折行 / TSV），工具会各自解析：
+支持 **12 个命令、7 种输出方言**，覆盖 Arch / Debian / Fedora / openSUSE / macOS /
+Windows——它们的语法和格式各不相同（旗标式 / 子命令式、单行 / 缩进 / 折行 / TSV /
+表格），工具会各自解析，**并且只列出当前系统真正适用的命令**：
 
-| 发行版 | 命令 | 输出形态 |
+| 平台 | 命令 | 输出形态 |
 | --- | --- | --- |
 | Arch / Manjaro | `pacman` `yay` `paru` | `仓库/名字 版本` + 4 空格缩进描述 |
 | Arch / Manjaro | `pamac` | `名字 版本 …右对齐仓库` + **折行**描述 |
 | Debian / Ubuntu | `apt` | `名字/仓库 版本 架构` + 2 空格缩进描述 |
 | Debian / Ubuntu | `apt-cache` | 单行 `名字 - 描述` |
 | Fedora / RHEL | `dnf` `yum` | ` 名字.架构`**TAB**描述 |
+| openSUSE | `zypper` | 表格 |
+| macOS | `brew` | `brew info` 的描述行、`brew search --desc` 的 `名字: 描述` |
+| Windows | `winget` | `winget show` 的 `Description:` 字段 |
 | 通用 | `flatpak` | **TSV**，描述是其中一列 |
 
-信息类命令也支持：`pacman -Si`、`pacman -Qi`、`pamac info`、`apt show`、`dnf info`
-（字段值折行、缩进续行都会正确合并再翻译）。
+信息类命令也支持：`pacman -Si`、`pacman -Qi`、`pamac info`、`apt show`、
+`dnf info`、`brew info`、`winget show`（字段值折行、缩进续行都会正确合并再翻译）。
+
+> `brew search` 和 `winget search` 的输出里**本来就没有描述**（前者只有包名，
+> 后者只有 Name / Id / Version / Match / Source 五列），所以对这两个命令的
+> `search` 是原样透传——真正带描述的是 `brew info` 和 `winget show`。
 
 ```
 $ pacman -Ss neovim
@@ -73,25 +81,65 @@ makepkg -si
 或者直接从 Release 里下 `.pkg.tar.zst`：
 
 ```sh
-sudo pacman -U pkgtrans-1.1-1-any.pkg.tar.zst
+sudo pacman -U pkgtrans-1.2-1-any.pkg.tar.zst
 ```
 
 （AUR 上架后 `yay -S pkgtrans` 即可。）
 
+### macOS（Homebrew）
+
+```sh
+git clone https://github.com/IrisDream-Cubic/pkgtrans
+cd pkgtrans
+./install.sh --user          # 装到 ~/.local/bin，不需要 sudo
+```
+
+翻译 `brew info <包名>` 的描述行，以及 `brew search --desc <关键词>` 的描述。
+`brew search` 本身只输出包名，没有可翻的东西，会原样透传。
+
+### Windows
+
+从 Release 下 `pkgtrans-windows-x64.exe`，放到任意目录（或者加进 `PATH`），
+然后：
+
+```powershell
+.\pkgtrans-windows-x64.exe keyadd        # 加 API Key
+.\pkgtrans-windows-x64.exe setup winget  # 接管 winget
+winget show Neovim.Neovim                # 描述自动翻成中文
+```
+
+**机器上还没有 winget 怎么办**（Windows Server / LTSC 常见）：
+
+```powershell
+.\pkgtrans-windows-x64.exe install-winget
+```
+
+它会去 `microsoft/winget-cli` 的最新 release 下载官方 App Installer 和对应的
+框架依赖（按 x64 / arm64 自动挑），再用 `Add-AppxPackage` 装上。装完重开一个
+窗口就能用 `winget` 了。
+
+> Windows 上的配置放在 `%APPDATA%\pkgtrans\`，缓存放在 `%LOCALAPPDATA%\pkgtrans\`，
+> 不会在家目录里凭空多出一个 `.config`。
+
+### openSUSE
+
+用源码 tarball 里的 `install.sh`，或者直接用原始脚本；`zypper search` 的解析
+已在支持列表里。
+
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install ./pkgtrans_1.1-1_all.deb
+sudo apt install ./pkgtrans_1.2-1_all.deb
 # 或
-sudo dpkg -i pkgtrans_1.1-1_all.deb
+sudo dpkg -i pkgtrans_1.2-1_all.deb
 ```
 
 ### Fedora / RHEL / openSUSE
 
 ```sh
-sudo rpm -ivh pkgtrans-1.1-1.noarch.rpm
+sudo rpm -ivh pkgtrans-1.2-1.noarch.rpm
 # 或
-sudo dnf install ./pkgtrans-1.1-1.noarch.rpm
+sudo dnf install ./pkgtrans-1.2-1.noarch.rpm
 ```
 
 ### Nix / NixOS
@@ -131,10 +179,12 @@ nix profile install github:IrisDream-Cubic/pkgtrans
 
 | 格式 | 文件 | 构建方式 |
 | --- | --- | --- |
-| Arch | `pkgtrans-1.1-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
-| deb | `pkgtrans_1.1-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
-| rpm | `pkgtrans-1.1-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
-| 源码 | `pkgtrans-1.1.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
+| Arch | `pkgtrans-1.2-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
+| deb | `pkgtrans_1.2-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
+| rpm | `pkgtrans-1.2-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
+| Windows | `pkgtrans-windows-x64.exe` | 在 **windows-latest** 上用 PyInstaller 打成单文件（不能在 Linux 上交叉编译） |
+| winget 清单 | `pkgtrans-1.2-winget-manifests.tar.gz` | `packaging/make-winget-manifest.py`，用真实 exe 的 sha256 生成 |
+| 源码 | `pkgtrans-1.2.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
 | Nix | *不发布 tarball* | flake 就是交付方式，见上面「Nix / NixOS」 |
 
 一次性全构建：
@@ -152,6 +202,22 @@ PSTRANS_FEDORA_IMAGE=docker.m.daocloud.io/library/fedora:latest \
 PSTRANS_NIX_IMAGE=dockerproxy.com/nixos/nix:latest \
 sh packaging/build-all.sh dist
 ```
+
+Windows 的 exe **必须**在 Windows 上打（PyInstaller 不支持交叉编译），所以本地
+`build-all.sh` 不管它，由 CI 的 Windows 任务产出。
+
+### 发布到 winget 源
+
+Release 里附带的 `pkgtrans-<版本>-winget-manifests.tar.gz` 已经填好了真实的
+exe sha256，解包后把 `manifests/` 整个目录提到
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) 即可：
+
+```sh
+tar -xzf pkgtrans-1.2-winget-manifests.tar.gz
+# fork winget-pkgs，把 manifests/ 下的四级目录原样拷进去，开 PR
+```
+
+合并之后 `winget install IrisDream.pkgtrans` 就能装。
 
 版本号只有一个来源：主程序的 `__version__`，脚本都从那里读（有自测盯着，
 改一处忘一处会直接挂）。完整构建 + 安装验证在 CI 里跑，见 `.github/workflows/release.yml`。
@@ -253,10 +319,14 @@ pkgtrans setup                 # 看状态表
 pkgtrans setup pamac flatpak   # 接管这两个
 pkgtrans setup apt flatpak     # Debian / Ubuntu
 pkgtrans setup dnf             # Fedora / RHEL
+pkgtrans setup brew            # macOS
+pkgtrans setup winget          # Windows
 pkgtrans setup all             # 接管所有已安装的
 pkgtrans putes pamac           # 取消 pamac（setup 反过来写）
 pkgtrans putes all             # 全部取消
 ```
+
+表格**只列当前系统适用的命令**。在 Arch 上长这样：
 
 ```
   包管理器    已安装  已接管
@@ -265,14 +335,31 @@ pkgtrans putes all             # 全部取消
   paru        -       -
   pamac       ✓       ✓
   flatpak     ✓       ✓
-  apt         -       -
-  apt-cache   -       -
-  dnf         -       -
-  yum         -       -
+```
+
+换到 Debian 上，`pacman` / `yay` / `paru` / `pamac` 就不会出现了：
+
+```
+  包管理器    已安装  已接管
+  apt         ✓       ✓
+  apt-cache   ✓       ✓
+  flatpak     -       -
+```
+
+规则是「本平台适用的 + 虽不适用但确实装了的」。所以：
+- Debian 上把 `pacman` 藏起来，不会误导人；
+- 但如果你真在 WSL 里装了个 `pacman`，它照样会出现在表里、也能被接管；
+- 反过来，`pkgtrans setup yay` 在 Debian 上会被明确拒绝，并告诉你本平台有哪些：
+
+```
+  ✗ yay 属于 Arch 系（Arch / Manjaro / EndeavourOS …），当前系统是 Debian 系（…）
+    本平台可用：apt, apt-cache, flatpak
 ```
 
 配置里 `shell_targets` 的含义：留空 / `auto` = 所有已安装的；`none` = 一个都不接管；
 否则就是显式列表。**注意 `putes all` 会写成 `none` 而不是留空**，否则会被当成「未配置」而自动反弹回全接管。
+
+> 想覆盖自动判定（比如 WSL 里想按 arch 看），设 `PSTRANS_PLATFORM=arch` 即可。
 
 ## 用法（包装命令）
 
@@ -290,9 +377,14 @@ apt show neovim                   # Description 字段
 dnf search neovim                 # Fedora / RHEL
 dnf info neovim
 
+brew info neovim                  # macOS（描述行紧跟在 ==> 包名: 版本 后面）
+brew search --desc neovim         # 带描述的那版 search
+winget show Neovim.Neovim         # Windows（Description 字段）
+zypper search neovim              # openSUSE
+
 pkgtrans pacman -Ss neovim        # 手动指定命令
 pkgtrans --lang 繁體中文 yay -Ss neovim
-apt search neovim | pkgtrans      # 管道过滤（自动识别 5 种方言）
+apt search neovim | pkgtrans      # 管道过滤（自动识别 7 种方言）
 pkgtrans --dialect pamac < out.txt
 
 pkgtrans off                      # 全局关闭，一切原样透传
@@ -405,20 +497,26 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **130 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **154 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
 - 协议：OpenAI 兼容 + Anthropic
 - 方言：pacman 旗标、pamac 折行合并与折回、flatpak TSV 列完整性与 `--columns`、
-  `--json` 透传、**apt / apt-cache / dnf**、管道模式自动识别 6 种方言
+  `--json` 透传、apt / apt-cache / dnf、**brew / winget**、管道模式自动识别 7 种方言
 - 信息类：`Summary` / `Description` 字段值折行、**续行合并**（含 dnf 续行重复的冒号）、
   失败时逐字节还原
+- 平台感知：六种平台各自该显示哪些命令、跨平台接管被拒绝、`PSTRANS_PLATFORM` 覆盖
 - 子命令：`keyadd/keylist/keyprefer/keyremove/keylock/keyunlock`、
-  `aim`（含 `zh-hant` `eo-latn` `default`）、`on/off`、`setup/putes/putesy`、`info`、`help`
+  `aim`（含 `zh-hant` `eo-latn` `default`）、`on/off`、`setup/putes/putesy`、
+  `install-winget`、`info`、`help`
 - 多密钥：优先密钥 401 时自动切换备用；`keylock` 后不切换
 - 安全性：27 条调用分类矩阵、`-Ssq` / `flatpak list` 等透传逐字节一致
 - logo：纯 ASCII、无歧义宽度字符、README 与程序输出逐字节一致
+
+Windows 上另跑 `packaging/windows-smoke.py`（完整自测依赖 POSIX 的 `.zshrc`
+和 `#!/bin/sh` 假二进制，跑不了），覆盖 exe 启动、平台判定、winget 解析、
+`install-winget` 和 `%APPDATA%` 路径。
 
 ## 开发者
 
