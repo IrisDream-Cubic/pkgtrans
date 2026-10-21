@@ -690,7 +690,7 @@ if "search" in argv:
           "sk-body-aaaaaaaaaaaa1111" not in body and "*****" in body, f"{body!r}"[:400])
     check("配置页：给出数量与优先项", "共 2 个" in body, f"{body!r}"[:400])
 
-    code, out, err = menu_in([IDX_KEYS, "p", "2"])
+    code, out, err = menu_in([IDX_KEYS, "2"])
     check("配置页：设为优先第 2 个", json.load(open(kf))["preferred"] == 2,
           str(json.load(open(kf)))[:200])
 
@@ -1325,7 +1325,28 @@ if "search" in argv:
         # 密钥屏
         code, text, saved = tui_case([DOWN, DOWN, ENTER, Q, Q], "keys")
         check("光标模式：Enter 打开「API Key」二级界面",
-              "添加 API Key" in text and "设为优先" in text, text[-500:])
+              "添加 Key" in text and "设为优先" in text, text[-500:])
+
+        # Key 屏：选中列表里的 Key 直接设为优先
+        key_home = tempfile.mkdtemp(prefix="pkgtrans-tui-keys-")
+        key_cfg = os.path.join(key_home, "config")
+        key_file = os.path.join(key_home, "keys.json")
+        with open(key_file, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "preferred": 1, "locked": False, "keys": [
+                {"id": 1, "provider": "DeepSeek", "style": "openai",
+                 "base": "https://api.deepseek.com/v1", "model": "deepseek-chat",
+                 "key": "sk-aaaaaaaaaaaa1111"},
+                {"id": 2, "provider": "OpenAI", "style": "openai",
+                 "base": "https://api.openai.com/v1", "model": "gpt-4o-mini",
+                 "key": "sk-bbbbbbbbbbbb2222"},
+            ]}, fh, ensure_ascii=False)
+        code, text = run_tty(["menu"], [DOWN, DOWN, ENTER, DOWN, ENTER, Q, Q],
+                             config=key_cfg, keys_file=key_file, home=key_home)
+        saved = json.load(open(key_file, encoding="utf-8"))
+        check("光标模式：Key 屏里选中列表项 = 直接设为优先",
+              saved["preferred"] == 2, f"preferred={saved['preferred']} {text[-200:]}")
+        check("光标模式：Key 屏提示 Enter 是设为优先",
+              "设为优先" in text, text[-300:])
 
         # 帮助 / 关于
         code, text, saved = tui_case([DOWN, DOWN, DOWN, ENTER, Q, Q], "help")
