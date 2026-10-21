@@ -17,6 +17,7 @@ _pkgtrans() {
     'setup:为包管理器启用翻译'
     'putes:取消某个包管理器的翻译'
     'install-winget:Windows 上自动安装 winget'
+    'menu:交互式设置面板（包管理器 / 语言 / API Key）'
     'on:全局开启'
     'off:全局关闭'
     'clear-cache:清空翻译缓存'

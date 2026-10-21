@@ -312,6 +312,55 @@ pkgtrans aim 文言文           # 不认识的直接当语言名用
 `zh-hans` `zh-cn` `zh` 都映射到简体中文，`zh-hant` `zh-tw` `zh-hk` 都映射到繁體中文。
 缓存按语言分开存，来回切换不会串味，也不会重复花 token。
 
+## 交互式设置面板
+
+不想记子命令的话，直接开面板，一个界面把常用设置都改完：
+
+```sh
+pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
+```
+
+```
+--------------------------------------------------------------
+ pkgtrans 1.2 · 设置                    Arch 系（Arch / Manjaro / EndeavourOS …）
+--------------------------------------------------------------
+ 翻译已开启 · 目标语言 简体中文 · API Key 1 个（优先 DeepSeek，未锁定）
+
+ 包管理器（输入编号切换接管）
+   1  pacman       已安装  ✓ 已接管
+   2  yay          已安装  ✓ 已接管
+   3  paru         未安装    未接管
+   4  pamac        已安装  ✓ 已接管
+   5  flatpak      已安装  ✓ 已接管
+
+ 其它
+   6  目标语言           简体中文
+   7  API Key        1 个（DeepSeek）
+   8  安装包管理器
+   9  查看最终配置
+   q  退出
+
+ 本平台不支持：apt、apt-cache、dnf、yum、zypper、brew、winget
+   （属于 Debian 系、Fedora 系、macOS、openSUSE、Windows）
+--------------------------------------------------------------
+ 输入编号或 q 退出 >
+```
+
+- **输编号即切换接管**，改完直接生效（重开窗口后加载）。
+- **本平台不支持的命令单独列在末尾并标注归属**，不会被当成可选项误导你。
+- **安装包管理器**：Windows 上能一键装 winget（下官方 App Installer），macOS 上能
+  跑 Homebrew 官方脚本；其它平台给出对应的安装命令（`sudo apt install flatpak` 之类），
+  AUR 才有的 `yay` / `paru` 会单独提示。
+- **目标语言**和 **API Key** 各有一层子菜单：语言可选 10 种预置或手填，密钥可以
+  添加 / 设为优先 / 删除 / 锁定。
+
+只用「编号 + 回车」的纯文本交互——不依赖 `curses`（Windows 的 stdlib 里没有），
+也不用 raw mode，所以管道喂输入也能跑：
+
+```sh
+printf '3\nq\n' | pkgtrans menu     # 脚本里切换第 3 项再退出
+```
+
 ## 包管理器 setup / putes
 
 ```sh
@@ -497,7 +546,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **154 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **171 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
@@ -507,6 +556,7 @@ python3 ~/.local/share/pkgtrans/run_tests.py
 - 信息类：`Summary` / `Description` 字段值折行、**续行合并**（含 dnf 续行重复的冒号）、
   失败时逐字节还原
 - 平台感知：六种平台各自该显示哪些命令、跨平台接管被拒绝、`PSTRANS_PLATFORM` 覆盖
+- 设置面板：`menu` 渲染、切换接管、改目标语言、加 API Key、各平台的安装入口与「本平台不支持」警示、EOF 干净退出
 - 子命令：`keyadd/keylist/keyprefer/keyremove/keylock/keyunlock`、
   `aim`（含 `zh-hant` `eo-latn` `default`）、`on/off`、`setup/putes/putesy`、
   `install-winget`、`info`、`help`

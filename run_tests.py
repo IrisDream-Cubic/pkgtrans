@@ -1016,6 +1016,86 @@ if "search" in argv:
     check("install-winget 在非 Windows 上明确拒绝（并指路本平台的命令）",
           code == 1 and "Windows" in err, f"code={code} {err!r}"[:220])
 
+    # ---------- 26. 交互式设置面板 ----------
+    print("[26] 交互式设置面板（menu）")
+    menu_home = tempfile.mkdtemp(prefix="pkgtrans-menu-")
+    menu_cfg = os.path.join(menu_home, "config")
+    menu_keys = os.path.join(menu_home, "keys.json")
+
+    def menu(stdin=b"q\n", plat="arch", path=None):
+        extra = {"PSTRANS_PLATFORM": plat}
+        if path:
+            extra["PATH"] = path
+        return run(["menu"], stdin=stdin, env_extra=extra,
+                   config=menu_cfg, keys=menu_keys, home=menu_home)
+
+    def row_index(out, label):
+        """从渲染出来的菜单里找某一行的编号（编号随平台变，不能写死）。"""
+        for line in plain(out).splitlines():
+            stripped = line.strip()
+            if label in line and stripped[:1].isdigit():
+                return int(stripped.split()[0])
+        return None
+
+    code, out, err = menu(path=no_bin)
+    body = plain(out)
+    check("menu：q 退出且退出码 0", code == 0, code)
+    check("menu：标题带版本和当前平台",
+          mod.__version__ in body and "Arch 系" in body, body[:200])
+    check("menu：列出本平台的全部命令",
+          all(m in body for m in mod.platform_managers()), body[:400])
+    check("menu：给出「本平台不支持」的警示",
+          "本平台不支持" in body and "brew" in body.split("本平台不支持")[-1],
+          body[-300:])
+    check("menu：四类入口齐全（管理 / 语言 / 密钥 / 安装 / 退出）",
+          all(w in body for w in ("目标语言", "API Key", "安装包管理器", "退出")),
+          body[-500:])
+
+    # 切换接管：arch 上第 5 行是 flatpak
+    code, out, err = menu(stdin=b"5\nq\n", path=no_bin)
+    saved = open(menu_cfg, encoding="utf-8").read() if os.path.exists(menu_cfg) else ""
+    check("menu：切换接管后写进配置", "shell_targets" in saved and "flatpak" in saved,
+          saved[:300])
+
+    # 改语言：5 个命令之后是「目标语言」，列表里第 2 项是繁體中文
+    lang_idx = row_index(out, "目标语言")
+    code, out, err = menu(stdin=f"{lang_idx}\n2\nq\n".encode(), path=no_bin)
+    saved = open(menu_cfg, encoding="utf-8").read() if os.path.exists(menu_cfg) else ""
+    check("menu：改目标语言（2 = 繁體中文）", "target_lang = 繁體中文" in saved,
+          saved[:300])
+
+    # 加 API Key：走 getpass（管道下会退回读 stdin）
+    keys_idx = row_index(out, "API Key")
+    code, out, err = menu(stdin=f"{keys_idx}\na\n1\nsk-menu-test\nq\n".encode(),
+                          path=no_bin)
+    data = {}
+    if os.path.exists(menu_keys):
+        with open(menu_keys, encoding="utf-8") as fh:
+            data = json.load(fh)
+    stored = data.get("keys") or []
+    check("menu：添加 API Key 并落盘",
+          bool(stored) and stored[0].get("provider") == "DeepSeek"
+          and stored[0].get("key") == "sk-menu-test", str(data)[:300])
+
+    # 安装屏：不同平台给不同方式
+    for plat, want in (("windows", "自动下载安装官方 App Installer"),
+                       ("macos", "运行 Homebrew 官方安装脚本"),
+                       ("debian", "sudo apt install")):
+        code, out, err = menu(plat=plat, path=no_bin)
+        idx = row_index(out, "安装包管理器")
+        check(f"{plat}：菜单里有安装入口", idx is not None, plain(out)[-300:])
+        if idx is None:
+            continue
+        code, out, err = menu(stdin=f"{idx}\n\nq\n".encode(), plat=plat, path=no_bin)
+        check(f"{plat}：安装屏给出正确方式", want in plain(out), plain(out)[-400:])
+
+    code, out, err = menu(stdin=b"", path=no_bin)
+    check("menu：stdin 立刻 EOF 也能干净退出", code == 0, code)
+
+    code, out, err = run(["ui"], stdin=b"q\n", env_extra={"PSTRANS_PLATFORM": "arch"},
+                         config=menu_cfg, keys=menu_keys, home=menu_home)
+    check("menu：ui 别名可用", code == 0 and "包管理器" in plain(out), plain(out)[:200])
+
     print()
     print("=" * 62)
     print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")

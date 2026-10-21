@@ -7,7 +7,7 @@ _pkgtrans_completions() {
   if [ "$COMP_CWORD" -eq 1 ]; then
     COMPREPLY=( $(compgen -W "help info check status aim keyadd keylist keyprefer \
 keyremove keylock keyunlock setup putes putesy unsetup on off clear-cache \
-show-config install-shell uninstall-shell install-winget" -- "$cur") )
+show-config install-shell uninstall-shell install-winget menu ui config" -- "$cur") )
     return
   fi
 

@@ -118,6 +118,16 @@ check("配置路径在 %APPDATA%\\\\pkgtrans 下",
       out[:400])
 check("配置路径不再是 ~/.config", ".config" not in out.lower(), out[:400])
 
+# 8. 交互式设置面板（管道喂 q 直接退出）
+proc = run(["menu"], stdin=b"q\n")
+out = text(proc.stdout)
+check("menu：能打开并退出", proc.returncode == 0, proc.returncode)
+check("menu：列出 winget", "winget" in out, out[:400])
+check("menu：给出本平台不支持的警示",
+      "本平台不支持" in out and "pacman" in out.split("本平台不支持")[-1], out[-400:])
+check("menu：四类入口齐全",
+      all(w in out for w in ("目标语言", "API Key", "安装包管理器", "退出")), out[-600:])
+
 print()
 print("=" * 56)
 print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")

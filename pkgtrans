@@ -344,7 +344,15 @@ def eprint(*args, **kwargs):
 
 
 def write_stdout(text: str) -> None:
-    """始终以 UTF-8 写 stdout，绕开系统 locale（本机 LC_ALL 是坏的）。"""
+    """始终以 UTF-8 写 stdout，绕开系统 locale（本机 LC_ALL 是坏的）。
+
+    先把文本层缓冲冲掉：菜单这类地方会混用 print() 和本函数，
+    不冲的话两边输出会交错。
+    """
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
     try:
         sys.stdout.buffer.write(text.encode("utf-8", "replace"))
         sys.stdout.buffer.flush()
@@ -809,6 +817,8 @@ HELP = f"""\
                       只列出本平台适用的命令，比如 Debian 上不会出现 yay
   putes [包管理器…]   取消（setup 反过来写；unsetup 同义）
   install-winget      仅 Windows：没装 winget 时自动下载安装官方 App Installer
+  menu                交互式设置面板（别名 ui / config）：包管理器开关、
+                      安装包管理器、目标语言、API Key，一个界面全搞定
   on / off            全局开启 / 关闭
   clear-cache         清空翻译缓存
   show-config         显示最终生效的配置
@@ -2944,6 +2954,349 @@ def cmd_onoff(st: Settings, enable: bool) -> int:
     return 0
 
 
+# ---------------------------------------------------------- 交互式设置面板
+#
+# 只用「编号 + 回车」的纯文本交互，不依赖 curses（Windows 的 stdlib 里没有），
+# 也不用 raw mode —— 这样管道喂输入也能跑，测试里可以脚本驱动。
+
+MENU_LANG_CHOICES = [
+    ("简体中文", "default"),
+    ("繁體中文", "zh-hant"),
+    ("日本語", "ja-jpan"),
+    ("한국어", "ko-kore"),
+    ("世界语（Esperanto）", "eo-latn"),
+    ("English", "en-latn"),
+    ("Français", "fr-latn"),
+    ("Deutsch", "de-latn"),
+    ("Español", "es-latn"),
+    ("Русский", "ru-cyrl"),
+]
+
+# 各平台装包管理器的命令；{name} 会被替换成命令名
+INSTALL_HINTS = {
+    "arch": "sudo pacman -S {name}",
+    "debian": "sudo apt install {name}",
+    "fedora": "sudo dnf install {name}",
+    "suse": "sudo zypper install {name}",
+    "macos": "brew install {name}",
+    "windows": "winget install {name}",
+}
+
+# AUR 里才有，官方仓库装不到
+AUR_ONLY = {"yay", "paru"}
+
+MENU_RULE = "-" * 62
+
+# 菜单/提示里用的短标签（完整标签太长，一行放不下）
+PLATFORM_SHORT = {
+    "arch": "Arch 系", "debian": "Debian 系", "fedora": "Fedora 系",
+    "suse": "openSUSE", "macos": "macOS", "windows": "Windows",
+    "linux": "Linux",
+}
+
+
+def _read_line(prompt_text):
+    """写提示并从 stdin 读一行；读到 EOF 返回 None。"""
+    write_stdout(prompt_text)
+    try:
+        line = sys.stdin.readline()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not line:
+        return None
+    return line.strip()
+
+
+def menu_rows(st: Settings):
+    """菜单的行（纯数据，渲染和测试共用）。"""
+    installed = set(installed_managers())
+    active = set(shell_targets(st))
+    rows = []
+    for name in visible_managers():
+        rows.append({"kind": "manager", "name": name,
+                     "installed": name in installed, "active": name in active})
+    rows.append({"kind": "lang"})
+    rows.append({"kind": "keys"})
+    rows.append({"kind": "install"})
+    rows.append({"kind": "config"})
+    rows.append({"kind": "quit"})
+    return rows
+
+
+def _menu_summary(st: Settings) -> str:
+    keys, preferred, locked = load_keys(st.keys_path)
+    bits = ["翻译已开启" if as_bool(st["enabled"]) else "翻译已关闭"]
+    bits.append(f"目标语言 {st['target_lang']}")
+    if keys:
+        first = next((k for k in keys if k.get("id") == preferred), keys[0])
+        bits.append(f"API Key {len(keys)} 个（优先 {first.get('provider')}"
+                    f"{'，已锁定' if locked else ''}）")
+    else:
+        bits.append("API Key 未配置")
+    return " · ".join(bits)
+
+
+def render_menu(st: Settings) -> None:
+    plat = current_platform()
+    rows = menu_rows(st)
+    header = f" {PROG} {__version__} · 设置"
+    pad = max(1, 40 - display_width(header))
+    lines = [MENU_RULE,
+             header + " " * pad + PLATFORM_LABELS.get(plat, plat),
+             MENU_RULE,
+             f" {_menu_summary(st)}",
+             "",
+             " 包管理器（输入编号切换接管）"]
+    for index, row in enumerate(rows, 1):
+        if row["kind"] != "manager":
+            continue
+        mark = "✓ 已接管" if row["active"] else "  未接管"
+        state = "已安装" if row["installed"] else "未安装"
+        lines.append(f" {index:>3}  {row['name']:<12} {state}  {mark}")
+
+    lines += ["", " 其它"]
+    for index, row in enumerate(rows, 1):
+        if row["kind"] == "manager":
+            continue
+        if row["kind"] == "lang":
+            label, value = "目标语言", str(st["target_lang"])
+        elif row["kind"] == "keys":
+            keys, preferred, _locked = load_keys(st.keys_path)
+            label = "API Key"
+            if keys:
+                first = next((k for k in keys if k.get("id") == preferred), keys[0])
+                value = f"{len(keys)} 个（{first.get('provider')}）"
+            else:
+                value = "未配置"
+        elif row["kind"] == "install":
+            label, value = "安装包管理器", ""
+        elif row["kind"] == "config":
+            label, value = "查看最终配置", ""
+        else:
+            lines.append("   q  退出")
+            continue
+        lines.append(f" {index:>3}  {_pad(label, 14)} {value}".rstrip())
+
+    shown = {r["name"] for r in rows if r["kind"] == "manager"}
+    hidden = [m for m in KNOWN_MANAGERS if m not in shown]
+    if hidden:
+        owners = sorted({MANAGER_META[m][0] for m in hidden})
+        lines += ["",
+                  f" 本平台不支持：{'、'.join(hidden)}",
+                  f"   （属于 {'、'.join(PLATFORM_SHORT.get(o, o) for o in owners)}）"]
+    lines.append(MENU_RULE)
+    write_stdout("\n".join(lines) + "\n")
+
+
+def _menu_toggle(st: Settings, name: str) -> None:
+    active = shell_targets(st)
+    if name in active:
+        _write_targets(st, [n for n in active if n != name])
+    else:
+        _write_targets(st, list(active) + [name])
+
+
+def menu_language(st: Settings) -> None:
+    lines = ["", " 目标语言"]
+    for i, (label, _code) in enumerate(MENU_LANG_CHOICES, 1):
+        mark = "  ←" if label == str(st["target_lang"]) else ""
+        lines.append(f" {i:>3}  {label}{mark}")
+    lines += ["   0  手动输入其它", "   b  返回"]
+    write_stdout("\n".join(lines) + "\n")
+    choice = _read_line(" 选择 > ")
+    if choice is None or choice.lower() in ("b", "q", ""):
+        return
+    if choice == "0":
+        custom = _read_line(" 输入语言名或代码（如 zh-hant / 日本語）> ")
+        if not custom:
+            return
+        lang = resolve_language(custom)
+    elif choice.isdigit() and 1 <= int(choice) <= len(MENU_LANG_CHOICES):
+        lang = resolve_language(MENU_LANG_CHOICES[int(choice) - 1][1])
+    else:
+        warn("没有这个编号")
+        return
+    if not lang:
+        warn("语言不能为空")
+        return
+    if not update_config_value(st.config_path, "target_lang", lang):
+        fail(f"写入配置失败：{st.config_path}")
+        return
+    st.set("target_lang", lang, "cli")
+    ok(f"目标语言已设为 {lang}")
+
+
+def menu_keys(st: Settings) -> None:
+    keys, preferred, locked = load_keys(st.keys_path)
+    lines = ["", " API Key"]
+    if keys:
+        width = max(len(str(k.get("provider", ""))) for k in keys)
+        for k in keys:
+            mark = "*" if k.get("id") == preferred else " "
+            lines.append(f" {mark}{k.get('id'):>2} -> {str(k.get('provider','')):<{width}}"
+                         f"  |  {mask_key(k.get('key',''))}")
+        first = next((k for k in keys if k.get("id") == preferred), keys[0])
+        lines.append(f"     共 {len(keys)} 个，当前优先：{first.get('provider')}"
+                     f"{'，已锁定' if locked else '，未锁定'}")
+    else:
+        lines.append("     （空，当前用配置文件 / 环境变量里的服务商）")
+    lines += ["", "   a  添加      p  设为优先      d  删除",
+              f"   l  {'解锁' if locked else '锁定'}      b  返回"]
+    write_stdout("\n".join(lines) + "\n")
+    choice = (_read_line(" 选择 > ") or "").lower()
+    if choice in ("", "b", "q"):
+        return
+    if choice == "a":
+        menu_add_key(st)
+    elif choice == "p":
+        which = _read_line(" 优先使用哪个编号 > ") or ""
+        if which.isdigit():
+            cmd_keyprefer(st, [which])
+    elif choice == "d":
+        which = _read_line(" 删除哪个编号 > ") or ""
+        if which.isdigit():
+            cmd_keyremove(st, [which])
+    elif choice == "l":
+        cmd_keylock(st, not locked)
+    else:
+        warn("没有这个选项")
+
+
+def menu_add_key(st: Settings) -> None:
+    lines = ["", " 服务商"]
+    for i, (name, _style, _base, model) in enumerate(KEY_PROVIDERS, 1):
+        lines.append(f" {i:>3}  {name:<12} {model}")
+    lines.append("   0  其它（自己填地址和模型）")
+    write_stdout("\n".join(lines) + "\n")
+    choice = _read_line(" 选择 > ") or ""
+    if not choice.isdigit():
+        warn("请输入编号")
+        return
+    n = int(choice)
+    if n == 0:
+        name = _read_line(" 服务商名字 > ") or "自定义"
+        style_raw = (_read_line(" 接口风格 [openai/anthropic] > ") or "").lower()
+        style = "anthropic" if style_raw == "anthropic" else "openai"
+        base = _read_line(" API 地址（如 https://api.example.com/v1）> ") or ""
+        model = _read_line(" 模型名 > ") or ""
+    elif 1 <= n <= len(KEY_PROVIDERS):
+        name, style, base, model = KEY_PROVIDERS[n - 1]
+    else:
+        warn("没有这个编号")
+        return
+
+    key = ""
+    try:
+        import getpass
+        key = getpass.getpass(" 粘贴 API Key（不回显）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    except Exception:
+        key = _read_line(" API Key > ") or ""
+    if not key:
+        warn("密钥为空，已取消")
+        return
+
+    keys, preferred, locked = load_keys(st.keys_path)
+    next_id = max([k.get("id", 0) for k in keys] + [0]) + 1
+    keys.append({"id": next_id, "provider": name, "style": style,
+                 "base": base, "model": model, "key": key})
+    save_keys(st.keys_path, keys, preferred or next_id, locked)
+    ok(f"已添加 {name}（编号 {next_id}）")
+
+
+def menu_install(st: Settings) -> None:
+    plat = current_platform()
+    installed = set(installed_managers())
+    missing = [m for m in platform_managers() if m not in installed]
+    lines = ["", " 安装包管理器"]
+    actions = []
+    if not missing:
+        lines.append(f"     {PLATFORM_LABELS.get(plat, plat)}：该装的都装好了")
+    for name in missing:
+        if name in AUR_ONLY:
+            lines.append(f"       {name:<12} 手动安装：来自 AUR，用 AUR 助手（如 yay -S {name}）")
+            continue
+        hint = INSTALL_HINTS.get(plat, "用系统包管理器安装 {name}").format(name=name)
+        if name == "winget" and plat == "windows":
+            actions.append(name)
+            lines.append(f" {len(actions):>3}  {name:<12} 自动下载安装官方 App Installer")
+        elif name == "brew" and plat == "macos":
+            actions.append(name)
+            lines.append(f" {len(actions):>3}  {name:<12} 运行 Homebrew 官方安装脚本")
+        else:
+            lines.append(f"       {name:<12} 手动安装：{hint}")
+    hidden = [m for m in KNOWN_MANAGERS
+              if m not in platform_managers() and m not in installed]
+    if hidden:
+        owners = sorted({MANAGER_META[m][0] for m in hidden})
+        lines += ["", f" 本平台不支持：{'、'.join(hidden)}",
+                  f"   （属于 {'、'.join(PLATFORM_SHORT.get(o, o) for o in owners)}）"]
+    lines += ["", "   b  返回"]
+    write_stdout("\n".join(lines) + "\n")
+    if not actions:
+        _read_line(" 回车返回 > ")
+        return
+    choice = _read_line(" 选择编号安装（回车返回）> ") or ""
+    if not choice.isdigit() or not (1 <= int(choice) <= len(actions)):
+        return
+    target = actions[int(choice) - 1]
+    confirm = _read_line(f" 确认安装 {target}？输入 yes 继续 > ") or ""
+    if confirm.lower() != "yes":
+        note("已取消")
+        return
+    if target == "winget":
+        cmd_install_winget(st, [])
+    elif target == "brew":
+        eprint("  运行 Homebrew 官方安装脚本（要联网下载，可能需要几分钟）…")
+        proc = subprocess.run(
+            ["/bin/bash", "-c",
+             'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL '
+             'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'])
+        if proc.returncode == 0:
+            ok("Homebrew 装好了，重开一个终端再试")
+        else:
+            fail(f"安装脚本退出码 {proc.returncode}")
+
+
+def cmd_menu(st: Settings, args) -> int:
+    """交互式设置面板：包管理器开关、安装、目标语言、API Key。"""
+    while True:
+        render_menu(st)
+        choice = _read_line(" 输入编号或 q 退出 > ")
+        if choice is None:                 # EOF：管道喂完了
+            return 0
+        choice = choice.strip().lower()
+        if choice in ("q", "quit", "exit"):
+            return 0
+        if not choice:
+            continue
+        rows = menu_rows(st)
+        if choice in ("s", "config"):
+            do_show_config(st)
+            continue
+        if not choice.isdigit():
+            warn("输入编号，或 q 退出")
+            continue
+        index = int(choice)
+        if not (1 <= index <= len(rows)):
+            warn("没有这个编号")
+            continue
+        row = rows[index - 1]
+        if row["kind"] == "manager":
+            _menu_toggle(st, row["name"])
+        elif row["kind"] == "lang":
+            menu_language(st)
+        elif row["kind"] == "keys":
+            menu_keys(st)
+        elif row["kind"] == "install":
+            menu_install(st)
+        elif row["kind"] == "config":
+            do_show_config(st)
+        elif row["kind"] == "quit":
+            return 0
+
+
 # ------------------------------------------------------------------ 分发
 
 SUBCOMMANDS = {
@@ -2951,6 +3304,7 @@ SUBCOMMANDS = {
     "aim", "keylist", "keyadd", "keyremove", "keyprefer", "keylock", "keyunlock",
     "setup", "putes", "putesy", "unsetup",
     "install-winget",
+    "menu", "ui", "config",
     "on", "off", "clear-cache", "show-config",
     "install-shell", "uninstall-shell",
 }
@@ -2988,6 +3342,8 @@ def dispatch_subcommand(name: str, rest):
         return cmd_putes(st, rest)
     if name == "install-winget":
         return cmd_install_winget(st, rest)
+    if name in ("menu", "ui", "config"):
+        return cmd_menu(st, rest)
     if name in ("on", "off"):
         return cmd_onoff(st, name == "on")
     if name == "clear-cache":
