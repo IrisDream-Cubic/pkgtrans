@@ -1193,6 +1193,8 @@ if "search" in argv:
     check("包管理器屏：没装的标灰", "未安装" in body, body[:600])
     check("包管理器屏：不可用的标红 [×]，但列表里不写是哪个系统",
           "[×]" in body and "仅在" not in body and "macOS" not in body, body[-700:])
+    check("包管理器屏：可用/不可用同级排列，没有文字分隔",
+          "不可用" not in body and "本平台不支持" not in body, body[-900:])
     check("包管理器屏：给出安装入口", "安装包管理器" in body, body[-500:])
 
     locked_idx = next((int(line.split()[0]) for line in body.splitlines()

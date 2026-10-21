@@ -3175,12 +3175,8 @@ def render_managers(st: Settings) -> None:
              "",
              f" {dim}勾选的会被接管；没装的要先把包装上{reset}",
              ""]
-    locked_header = False
     for index, row in enumerate(rows, 1):
         if not row["available"]:
-            if not locked_header:
-                lines += ["", f" {dim}不可用（选中查看原因）{reset}"]
-                locked_header = True
             state = "已安装" if row["installed"] else "未安装"
             lines.append(f" {index:>3}  {red}[×]{reset} {red}{row['name']:<12}{reset}"
                          f" {dim}{state}{reset}")
@@ -3664,12 +3660,8 @@ def tui_managers(st: Settings) -> None:
         focus = max(0, min(focus, len(rows) - 1))
         lines = [MENU_RULE, " 包管理器", "",
                  f" {DIM}勾选的会被接管；没装的要先把包装上{RESET}", ""]
-        locked_header = False
         for i, row in enumerate(rows):
             if not row["available"]:
-                if not locked_header:
-                    lines += ["", f" {DIM}不可用（选中查看原因）{RESET}"]
-                    locked_header = True
                 state = "已安装" if row["installed"] else "未安装"
                 text = (f"{RED}[×]{RESET} {RED}{row['name']:<13}{RESET}"
                         f"{DIM}{state}{RESET}")
