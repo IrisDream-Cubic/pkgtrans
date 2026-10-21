@@ -70,6 +70,7 @@ def changelog_text(version: str) -> str:
     brew / winget / flatpak 共 12 个命令，并按平台自动过滤
   * 多 API Key 管理与失败自动回退，可锁定为只用一个
   * 目标语言可切换（简体 / 繁體 / 日本語 / 한국어 / 世界语 …）
+  * 配置页是唯一的设置入口（help / --version / 包装调用之外不再有子命令）
   * setup / putes 管理 shell 集成，on / off 全局开关
   * menu 交互式设置面板：包管理器开关 / 语言 / API Key 一处搞定
 

@@ -653,8 +653,8 @@ if "search" in argv:
            if mod.classify(c, a) != w]
     check(f"分类矩阵 {len(cases)} 条全部正确", not bad, "; ".join(bad))
 
-    # ---------- 15. 子命令：密钥库管理 ----------
-    print("[15] 子命令：密钥库管理")
+    # ---------- 15. 密钥库管理（在配置页里） ----------
+    print("[15] 密钥库管理（在配置页里）")
     cdir = os.path.join(TMP, "cfg15")
     os.makedirs(cdir, exist_ok=True)
     cfg = os.path.join(cdir, "config")
@@ -662,74 +662,103 @@ if "search" in argv:
     fake_home = os.path.join(TMP, "home15")
     os.makedirs(fake_home, exist_ok=True)
     common = dict(config=cfg, keys=kf, home=fake_home)
+    zshrc = os.path.join(fake_home, ".zshrc")
 
-    code, out, err = run(["keyadd", "DeepSeek", "sk-body-aaaaaaaaaaaa1111"], **common)
-    check("keyadd：写入并给出提示", code == 0 and "已添加 DeepSeek" in err, f"{err!r}"[:200])
-    check("keyadd：密钥库权限 600", oct(os.stat(kf).st_mode & 0o777) == "0o600",
+    # 配置页的行号：所有包管理器之后依次是这些动作
+    N = len(mod.KNOWN_MANAGERS)
+    IDX_ENABLED, IDX_LANG, IDX_KEYS = N + 1, N + 2, N + 3
+    IDX_CHECK, IDX_CLEAR, IDX_INSTALL = N + 4, N + 5, N + 6
+    IDX_CONFIG, IDX_ABOUT = N + 7, N + 8
+
+    def menu_in(seq, **kw):
+        """按行模式喂一串输入给配置页，末尾自动补 q 退出。"""
+        data = "\n".join(str(x) for x in seq) + "\nq\n"
+        return run(["menu"], stdin=data.encode(), **{**common, **kw})
+
+    code, out, err = menu_in([IDX_KEYS, "a", "1", "sk-body-aaaaaaaaaaaa1111"])
+    check("配置页：添加 API Key 并提示", "已添加 DeepSeek" in err, f"{err!r}"[:200])
+    check("配置页：密钥库权限 600", oct(os.stat(kf).st_mode & 0o777) == "0o600",
           oct(os.stat(kf).st_mode & 0o777))
 
-    run(["keyadd", "Claude", "sk-ant-zzzz-999988887777"], **common)
-    code, out, err = run(["keylist"], **common)
-    check("keylist：两条都列出", "DeepSeek" in out and "Claude" in out, f"{out!r}"[:200])
-    check("keylist：不泄露完整密钥", "sk-body-aaaaaaaaaaaa1111" not in out
-          and "*****" in out, f"{out!r}"[:200])
-    check("keylist：给出数量与优先项", "共 2 个 API key" in out and "当前优先" in out,
-          f"{out!r}"[:200])
+    code, out, err = menu_in([IDX_KEYS, "a", "3", "sk-beta-222233334444"])
+    check("配置页：两个 Key 都存下了", len(json.load(open(kf))["keys"]) == 2,
+          str(json.load(open(kf)))[:200])
+    code, out, err = menu_in([IDX_KEYS])          # 再进一次密钥屏看列表
+    body = plain(out)
+    check("配置页：两个 Key 都列出来", "DeepSeek" in body and "OpenAI" in body,
+          f"{body!r}"[:400])
+    check("配置页：不泄露完整密钥",
+          "sk-body-aaaaaaaaaaaa1111" not in body and "*****" in body, f"{body!r}"[:400])
+    check("配置页：给出数量与优先项", "共 2 个" in body, f"{body!r}"[:400])
 
-    code, out, err = run(["keyprefer", "2"], **common)
-    check("keyprefer 2：改成 Claude 优先", "已把 Claude" in err, f"{err!r}"[:200])
-    code, out, err = run(["keyprefer"], **common)
-    check("keyprefer（无参）：查询优先项", "Claude" in out, f"{out!r}"[:200])
+    code, out, err = menu_in([IDX_KEYS, "p", "2"])
+    check("配置页：设为优先第 2 个", json.load(open(kf))["preferred"] == 2,
+          str(json.load(open(kf)))[:200])
 
-    code, out, err = run(["keylock"], **common)
-    check("keylock：提示已锁定", "已锁定" in err, f"{err!r}"[:200])
-    check("keylock：落盘 locked=true", json.load(open(kf))["locked"] is True)
-    code, out, err = run(["keyunlock"], **common)
-    check("keyunlock：提示已解锁", "已解锁" in err, f"{err!r}"[:200])
-    check("keyunlock：落盘 locked=false", json.load(open(kf))["locked"] is False)
+    code, out, err = menu_in([IDX_KEYS, "l"])
+    check("配置页：锁定成功", json.load(open(kf))["locked"] is True)
+    code, out, err = menu_in([IDX_KEYS, "l"])
+    check("配置页：解锁成功", json.load(open(kf))["locked"] is False)
 
-    code, out, err = run(["keyremove", "1"], **common)
-    check("keyremove：删掉后只剩 1 条", code == 0 and len(json.load(open(kf))["keys"]) == 1,
+    code, out, err = menu_in([IDX_KEYS, "d", "1"])
+    check("配置页：删除后只剩 1 个", len(json.load(open(kf))["keys"]) == 1,
+          str(json.load(open(kf)))[:200])
+    code, out, err = menu_in([IDX_KEYS, "d", "99"])
+    check("配置页：删不存在的编号不改动文件",
+          len(json.load(open(kf))["keys"]) == 1, str(json.load(open(kf)))[:200])
+
+    # ---------- 16. 配置页：语言 / 接管 / 开关 / 自检 / 清缓存 ----------
+    print("[16] 配置页：语言 / 接管 / 翻译开关 / 查看配置 / 清缓存 / 自检")
+    # 给一个确定基线，免得受「本机装了什么」影响
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write("# 测试基线\nenabled = 1\ntarget_lang = 简体中文\nshell_targets = none\n")
+
+    code, out, err = menu_in([IDX_LANG, "2"])
+    check("配置页：改目标语言（2 = 繁體中文）",
+          "目标语言已设为 繁體中文" in err and "target_lang = 繁體中文" in open(cfg).read(),
           f"{err!r}"[:200])
-    code, out, err = run(["keyremove", "99"], **common)
-    check("keyremove 不存在的编号：报错且不动文件",
-          code == 2 and len(json.load(open(kf))["keys"]) == 1)
 
-    # ---------- 16. 子命令：aim / on / off / setup ----------
-    print("[16] 子命令：aim / on / off / setup / putes")
-    code, out, err = run(["aim", "zh-hant"], **common)
-    check("aim zh-hant：映射为繁體中文并提示", code == 0 and "繁體中文" in err, f"{err!r}"[:200])
-    check("aim：写进配置文件", "target_lang = 繁體中文" in open(cfg).read())
-    code, out, err = run(["aim"], **common)
-    check("aim（无参）：查询当前语言", "繁體中文" in out, f"{out!r}"[:200])
-    code, out, err = run(["aim", "eo-latn"], **common)
-    check("aim eo-latn：映射为世界语", "世界语" in err, f"{err!r}"[:200])
-    code, out, err = run(["aim", "default"], **common)
-    check("aim default：回到简体中文", "简体中文" in err, f"{err!r}"[:200])
+    code, out, err = menu_in([1, 2])
+    saved = open(cfg).read()
+    check("配置页：切换接管写进配置", "shell_targets = pacman,yay" in saved, saved[-160:])
+    block = open(zshrc).read() if os.path.exists(zshrc) else ""
+    check("配置页：只接管这两个（别的命令不写进去）",
+          "pacman()" in block and "yay()" in block and "flatpak()" not in block,
+          block[:300])
 
-    code, out, err = run(["setup"], **common)
-    check("setup（无参）：打印接管状态表",
-          "包管理器" in out and "已接管" in out and "pacman" in out, f"{out!r}"[:200])
-    # 先显式建一个基线：CI runner、rpmbuild/makepkg 环境里一个包管理器都没装，
-    # 靠 auto 探测会得到空集，putes all 就没东西可取消，后面的断言全崩。
-    run(["setup", "pacman"], **common)
-    code, out, err = run(["putes", "all"], **common)
-    check("putes all：配置写成 none（不会自动反弹）",
-          "shell_targets = none" in open(cfg).read(), open(cfg).read()[-120:])
-    zshrc = os.path.join(fake_home, ".zshrc")
-    check("putes all：块里不再定义任何函数",
-          os.path.exists(zshrc) and "() {" not in open(zshrc).read())
-    code, out, err = run(["setup", "pamac", "flatpak"], **common)
-    block = open(zshrc).read()
-    check("setup pamac flatpak：只接管这两个",
-          "pamac()" in block and "flatpak()" in block and "pacman()" not in block,
-          f"{block!r}"[:300])
-    check("setup：回执点出接管列表", "已接管：pamac, flatpak" in err, f"{err!r}"[:200])
-    code, out, err = run(["putes", "pamac"], **common)
-    check("putes pamac：取消接管", "已接管：flatpak" in err and "pamac()" not in open(zshrc).read(),
+    code, out, err = menu_in([2])
+    check("配置页：再点一次取消接管",
+          "shell_targets = pacman" in open(cfg).read()
+          and "yay()" not in open(zshrc).read(), open(cfg).read()[-160:])
+
+    code, out, err = menu_in([IDX_ENABLED])
+    check("配置页：关掉翻译总开关",
+          "翻译已关闭" in err and "enabled = 0" in open(cfg).read(), f"{err!r}"[:200])
+    reset()
+    code, out, err = run([], stdin=SAMPLE.encode(), **common)
+    check("关掉之后搜索逐字节原样透传", out == SAMPLE, f"{out!r}"[:120])
+    code, out, err = menu_in([IDX_ENABLED])
+    check("配置页：再打开",
+          "翻译已开启" in err and "enabled = 1" in open(cfg).read(), f"{err!r}"[:200])
+
+    code, out, err = menu_in([IDX_CONFIG])
+    check("配置页：查看最终配置",
+          "target_lang" in plain(out) and "api_style" in plain(out), plain(out)[:300])
+
+    cache_p = os.path.join(cdir, "cache.json")
+    with open(cache_p, "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    code, out, err = menu_in([IDX_CLEAR], cache_file=cache_p)
+    check("配置页：清空缓存", "已删除缓存" in err and not os.path.exists(cache_p),
           f"{err!r}"[:200])
-    code, out, err = run(["putesy", "flatpak"], **common)   # setup 反写的错拼也认
-    check("putesy 别名可用（setup 反写）", code == 0 and "flatpak()" not in open(zshrc).read())
+
+    reset()
+    code, out, err = run(["menu"], stdin=f"{IDX_CHECK}\nq\n".encode(),
+                         **{**common, "keys": None})
+    check("配置页：自检能跑通并打印配置",
+          code == 0 and "配置文件" in plain(out) and "目标语言" in plain(out),
+          plain(out)[:300])
+
     # guess_shell 的判定逻辑：进程内直接测，这样与跑测试的机器是什么 shell 无关
     import pwd as _pwd
     real_getpwuid = _pwd.getpwuid
@@ -761,24 +790,15 @@ if "search" in argv:
             os.environ["SHELL"] = saved_shell
 
     # 终端模拟器 ≠ shell：提示语要点出「窗口」和「shell」两层（提示走 stderr）
-    code, out, err = run(["setup"], env_extra={"KITTY_WINDOW_ID": "1"}, **common)
-    check("提示语能认出 kitty 窗口", "kitty 窗口" in err and "exec zsh" in err, f"{err!r}"[:220])
-    code, out, err = run(["setup"], env_extra={"KONSOLE_VERSION": "260800",
-                                              "KONSOLE_DBUS_SERVICE": ":1.5"}, **common)
+    code, out, err = menu_in([1], env_extra={"KITTY_WINDOW_ID": "1"})
+    check("提示语能认出 kitty 窗口", "kitty 窗口" in err and "exec zsh" in err,
+          f"{err!r}"[:240])
+    code, out, err = menu_in([1], env_extra={"KONSOLE_VERSION": "260800",
+                                            "KONSOLE_DBUS_SERVICE": ":1.5"})
     check("KONSOLE_* 泄露时不会被误报成 Konsole（弱信号不用）",
-          "Konsole" not in err and "新开一个终端窗口" in err, f"{err!r}"[:220])
-    code, out, err = run(["setup"], env_extra={"SHELL": "/bin/bash"}, **common)
-    check("提示语跟着 shell 走（bash 时 exec bash）", "exec bash" in err, f"{err!r}"[:220])
-
-    code, out, err = run(["off"], **common)
-    check("off：提示已关闭并写盘", "已关闭" in err and "enabled = 0" in open(cfg).read(),
-          f"{err!r}"[:200])
-    reset()
-    code, out, err = run([], stdin=SAMPLE.encode(), **common)
-    check("off 之后搜索逐字节原样透传", out == SAMPLE, f"{out!r}"[:120])
-    code, out, err = run(["on"], **common)
-    check("on：提示已开启并写盘", "已开启" in err and "enabled = 1" in open(cfg).read(),
-          f"{err!r}"[:200])
+          "Konsole" not in err and "新开一个终端窗口" in err, f"{err!r}"[:240])
+    code, out, err = menu_in([1], env_extra={"SHELL": "/bin/bash"})
+    check("提示语跟着 shell 走（bash 时 exec bash）", "exec bash" in err, f"{err!r}"[:240])
 
     # ---------- 17. 多密钥回退与锁定 ----------
     print("[17] 多密钥自动回退 / 锁定")
@@ -830,8 +850,14 @@ if "search" in argv:
         code, out, err = run([flag], **common)
         check(f"{flag} 等同 info", "Toru Momose" in out)
     code, out, err = run(["help"], **common)
-    check("help：列出子命令", all(k in out for k in ("keyadd", "keylist", "setup", "putes",
-                                                    "aim", "on / off")), f"{out!r}"[:200])
+    check("help：只列剩下的子命令",
+          all(k in out for k in ("menu", "help", "info")), f"{out!r}"[:300])
+    sub_block = out.split("子命令:", 1)[1].split("\n\n", 1)[0] if "子命令:" in out else ""
+    check("help：子命令区只剩 help / info / menu",
+          sub_block and not any(k in sub_block
+                                for k in ("keyadd", "keylist", "setup", "putes", "aim")),
+          sub_block[:300])
+    check("help：说明配置页能改什么", "配置页里能改的东西" in out, f"{out!r}"[:300])
 
     # ---------- 19. logo 的宽度安全性 ----------
     print("[19] logo：纯 ASCII、宽度确定，放进 markdown 不会折行错位")
@@ -983,7 +1009,7 @@ if "search" in argv:
               f"pkgtrans-{found['pkgtrans']}.tar.gz" in names, str(names))
 
     # ---------- 23. 平台感知 ----------
-    print("[23] 平台感知：只显示本平台的包管理器")
+    print("[23] 平台感知：可用的排前面，用不了的标红锁定")
     no_bin = tempfile.mkdtemp(prefix="pkgtrans-nopath-")
     # 给一个只含 python3 的 PATH：既能模拟「什么都没装」的干净机器，
     # 又不至于让脚本自己的 `#!/usr/bin/env python3` 都找不到解释器。
@@ -992,13 +1018,26 @@ if "search" in argv:
     except OSError:
         no_bin = None      # 造不出来就退回真实 PATH，这几条断言会宽松些
 
-    def table_rows(out):
-        rows = []
-        for line in plain(out).splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and parts[0] in mod.KNOWN_MANAGERS:
-                rows.append(parts[0])
-        return rows
+    def menu_plat(plat, stdin=b"q\n", path=None):
+        return run(["menu"], stdin=stdin,
+                   env_extra={"PSTRANS_PLATFORM": plat, "PATH": path or no_bin}, **common)
+
+    def split_managers(text):
+        """从渲染出来的配置页里分出「可用」和「锁定」两拨。"""
+        usable, locked = [], []
+        for name in mod.KNOWN_MANAGERS:
+            if re.search(rf"\[[✓ ]\] {re.escape(name)}\b", text):
+                usable.append(name)
+            elif re.search(rf"\[×\] {re.escape(name)}\b", text):
+                locked.append(name)
+        return usable, locked
+
+    def row_of(text, name, mark):
+        for line in text.splitlines():
+            m = re.match(rf"\s*(\d+)\s+\[{mark}\] {re.escape(name)}\b", line)
+            if m:
+                return int(m.group(1))
+        return None
 
     for plat, want in (
         ("debian",  ["apt", "apt-cache", "flatpak"]),
@@ -1009,23 +1048,32 @@ if "search" in argv:
         ("arch",    ["pacman", "yay", "paru", "pamac", "flatpak"]),
     ):
         reset("http500")
-        # PATH 清空，模拟「什么都没装」的干净机器，避免本机装了别的命令干扰
-        code, out, err = run(["setup"], env_extra={"PSTRANS_PLATFORM": plat,
-                                                  "PATH": no_bin}, **common)
-        got = table_rows(out)
-        check(f"{plat}：表格只列 {', '.join(want)}", got == want, f"实际 {got}")
-        check(f"{plat}：说明里点出当前系统", mod.PLATFORM_LABELS[plat] in err,
-              f"{err!r}"[:200])
+        code, out, err = menu_plat(plat)
+        usable, locked = split_managers(plain(out))
+        check(f"{plat}：可用的是 {', '.join(want)}", usable == want, f"实际 {usable}")
+        check(f"{plat}：其余都锁定",
+              set(locked) == set(mod.KNOWN_MANAGERS) - set(want), f"锁定 {locked}")
+        check(f"{plat}：标题点出当前系统", mod.PLATFORM_LABELS[plat] in plain(out),
+              plain(out)[:200])
 
-    code, out, err = run(["setup", "brew"],
-                         env_extra={"PSTRANS_PLATFORM": "debian", "PATH": no_bin}, **common)
-    check("debian 上 setup brew 被明确拒绝（并说明它属于 macOS）",
-          code == 1 and "属于" in err and "macOS" in err, f"code={code} {err!r}"[:220])
+    # 选一个锁定项：只给理由，不改配置
+    code, out, err = menu_plat("debian")
+    brew_idx = row_of(plain(out), "brew", "×")
+    check("debian：brew 是锁定行（有编号能选中）", brew_idx is not None, plain(out)[-500:])
+    if brew_idx:
+        code, out, err = menu_plat("debian", stdin=f"{brew_idx}\nq\n".encode())
+        check("debian：选中 brew 给出理由",
+              "属于" in err and "macOS" in err and "用不了" in err, f"{err!r}"[:240])
 
-    code, out, err = run(["setup", "apt"],
-                         env_extra={"PSTRANS_PLATFORM": "debian", "PATH": no_bin}, **common)
-    check("debian 上 setup apt 可以接管", code == 0 and "已接管" in err,
-          f"code={code} {err!r}"[:220])
+    # 选一个可用项：能接管
+    code, out, err = menu_plat("debian")
+    apt_idx = row_of(plain(out), "apt", " ")
+    check("debian：apt 是可用行", apt_idx is not None, plain(out)[-500:])
+    if apt_idx:
+        code, out, err = menu_plat("debian", stdin=f"{apt_idx}\nq\n".encode())
+        check("debian：选中 apt 可以接管",
+              "已接管" in err and "shell_targets = apt" in open(cfg).read(),
+              f"{err!r}"[:240])
 
     # ---------- 24. Homebrew ----------
     print("[24] Homebrew 方言")
@@ -1082,9 +1130,6 @@ if "search" in argv:
     code, out, err = run([], stdin=WINGET_SEARCH.encode())
     check("winget search：没有描述列 -> 逐字节原样", out == WINGET_SEARCH, f"{out!r}"[:200])
 
-    code, out, err = run(["install-winget"], **common)
-    check("install-winget 在非 Windows 上明确拒绝（并指路本平台的命令）",
-          code == 1 and "Windows" in err, f"code={code} {err!r}"[:220])
 
     # ---------- 26. 交互式设置面板 ----------
     print("[26] 交互式设置面板（menu）")
@@ -1241,29 +1286,29 @@ if "search" in argv:
 
         # Enter 在操作行上进入二级界面，q 只返回、不退出
         code, text, saved = tui_case(
-            [b"\x1b[B"] * n_managers + [b"\r", b"q", b"q"], "lang")
+            [b"\x1b[B"] * (n_managers + 1) + [b"\r", b"q", b"q"], "lang")
         check("光标模式：Enter 打开「目标语言」二级界面",
               "手动输入其它" in text and "返回" in text, text[-420:])
         check("光标模式：二级界面里 q 只返回，程序仍然正常退出", code == 0, code)
 
         code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 1) + [b"\r", b"q", b"q"], "keys")
+            [b"\x1b[B"] * (n_managers + 2) + [b"\r", b"q", b"q"], "keys")
         check("光标模式：Enter 打开「API Key」二级界面",
               "添加 API Key" in text and "设为优先" in text, text[-420:])
 
         code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 2) + [b"\r", b"q", b"q"], "install")
+            [b"\x1b[B"] * (n_managers + 5) + [b"\r", b"q", b"q"], "install")
         check("光标模式：Enter 打开「安装包管理器」二级界面",
               "安装包管理器" in text and "返回" in text, text[-500:])
 
         code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 3) + [b"\r", b"q", b"q"], "config")
+            [b"\x1b[B"] * (n_managers + 6) + [b"\r", b"q", b"q"], "config")
         check("光标模式：Enter 打开「最终配置」二级界面",
               "target_lang" in text and "api_style" in text, text[-700:])
 
         # 语言二级界面里 Enter 确认后写盘
         code, text, saved = tui_case(
-            [b"\x1b[B"] * n_managers + [b"\r", b"\x1b[B", b"\r", b"q"], "lang-pick")
+            [b"\x1b[B"] * (n_managers + 1) + [b"\r", b"\x1b[B", b"\r", b"q"], "lang-pick")
         check("光标模式：语言二级界面用 Enter 确认并落盘",
               "target_lang = 繁體中文" in saved, f"n={n_managers} {saved[:300]}")
 

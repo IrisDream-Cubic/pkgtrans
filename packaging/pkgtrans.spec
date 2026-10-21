@@ -60,6 +60,9 @@ install -Dpm0644 packaging/_pkgtrans \
 - 修复：Windows 上输出被管道接走时中文会抛 UnicodeEncodeError
 - 修复：rpmbuild 的 %check 在缺 git 的环境里会崩
 - 修复：源码包不带参数构建时版本号为空（pkgtrans-.tar.gz）
+- 交互式配置页成为唯一的设置入口：keyadd / aim / setup / putes / on / off /
+  check / clear-cache / show-config / install-winget 等子命令全部收进配置页，
+  对外只保留 help / --version / 包装调用
 - 修复：`pkgtrans setup | head` 的退出码是 120
 
 * Tue Oct 20 2026 Toru Momose <iris@iris-dream.top> - 1.2-1

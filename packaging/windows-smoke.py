@@ -71,15 +71,17 @@ check("--version 输出开发者", "Toru Momose" in out, out)
 proc = run(["help"])
 out = text(proc.stdout)
 check("help 退出码 0", proc.returncode == 0, proc.returncode)
-for word in ("install-winget", "setup", "keyadd", "aim"):
+for word in ("help", "menu", "info"):
     check(f"help 里有 {word}", word in out, out[:400])
+check("help 子命令区不再有 keyadd / setup", "keyadd" not in out.split("子命令:")[1].split("\n\n")[0],
+      out[:600])
 
-# 3. 平台判定
-proc = run(["setup"])
+# 3. 平台判定（配置页现在把所有命令都列出来，用不了的标红锁定）
+proc = run(["menu"], stdin=b"q\n")
 out, err = text(proc.stdout), text(proc.stderr)
-check("setup 表格里有 winget", "winget" in out, out[:400])
-check("setup 说明当前是 Windows", "Windows" in err, err[:400])
-check("setup 表格里没有 pacman", "pacman" not in out, out[:400])
+check("配置页里有 winget", "winget" in out, out[:400])
+check("配置页标题点出 Windows", "Windows" in out, out[:400])
+check("pacman 被标成锁定（[×]）", "[×] pacman" in out, out[-600:])
 
 # 4. winget show 的 Description 被认出来（没有 API 时着黄）
 SHOW = (b"Found Neovim [Neovim.Neovim]\r\n"
@@ -103,15 +105,18 @@ check("winget search：没有描述列 -> 逐字节原样",
       proc.stdout.replace(b"\r\n", b"\n") == SEARCH.replace(b"\r\n", b"\n"),
       proc.stdout)
 
-# 6. install-winget（windows-latest 自带 winget）
-proc = run(["install-winget"])
-err = text(proc.stderr)
-check("install-winget：已装 winget 时直接说已经装了",
-      proc.returncode == 0 and "已经装了" in err, f"{proc.returncode} {err[:300]}")
+# 6. 安装屏里能看到 winget 的自动安装入口
+proc = run(["menu"], stdin=b"q\n")
+out = text(proc.stdout)
+check("配置页里有「安装包管理器」入口", "安装包管理器" in out, out[:600])
 
 # 7. 配置目录在 %APPDATA% 下
-proc = run(["show-config"])
-out = text(proc.stdout) + text(proc.stderr)
+proc = run(["menu"], stdin=b"q\n")
+out = text(proc.stdout)
+# 「查看最终配置」是二级界面，这里只要确认配置页本身跑得起来、
+# 且配置路径走的是 %APPDATA%
+proc2 = run(["--check"])
+out += text(proc2.stdout) + text(proc2.stderr)
 appdata = os.environ.get("APPDATA", "")
 check("配置路径在 %APPDATA%\\\\pkgtrans 下",
       appdata and appdata.lower() in out.lower() and "pkgtrans" in out,

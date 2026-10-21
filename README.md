@@ -52,7 +52,7 @@ writedoc  2.1-2                                              AUR
 $ flatpak search neovim                              ← TSV 只动 description 列
 Neovim  ⇥ 融合了可扩展性和可用性的 Vim 分支 ⇥ io.neovim.nvim ⇥ 0.12.5 ⇥ stable ⇥ flathub
 
-$ pkgtrans aim zh-hant && pacman -Ss neovide         ← 目标语言随时可换
+$ pkgtrans                                   ← 打开配置页，目标语言随时可换
 extra/neovide 0.16.2-2
     Rust 打造的正經 Neovim 客戶端
 ```
@@ -225,62 +225,50 @@ tar -xzf pkgtrans-1.3-winget-manifests.tar.gz
 ## 快速开始
 
 ```sh
-# 1) 添加 API Key（交互式选服务商，密钥不回显）
-pkgtrans keyadd
-
-# 2) 自检：打印生效配置并真实调一次 API
-pkgtrans check
-
-# 3) 直接用，和平时一模一样
-pacman -Ss neovim
-pamac search neovim
-flatpak search neovim
+pkgtrans                      # 打开配置页，按提示加 API Key
 ```
 
-`setup` 已经把 shell 集成写进 `~/.zshrc`，**新开一个终端**或 `source ~/.zshrc` 后生效。
-在终端里跑 `type pacman`，显示 `pacman is a shell function` 就说明拦截已生效。
+配置页里 `↑`/`↓` 移动光标、`Space` 勾选、`Enter` 进入下一层，加完 Key 就能直接用：
 
-## 子命令一览
+```sh
+pacman -Ss neovim             # 和平时一模一样，描述会自动翻译
+apt search neovim
+dnf search neovim
+brew info neovim
+winget show Neovim.Neovim
+```
+
+## 命令一览
+
+对外只保留三件事，其余全部收进配置页：
 
 | 命令 | 作用 |
 | --- | --- |
-| `pkgtrans help` | 显示完整帮助 |
-| `pkgtrans info` / `-v` / `--version` | 大字 `PKGTRANS` 图案 + 开发者信息 |
-| `pkgtrans check` / `status` | 自检：配置、密钥链路、颜色、shell 集成、真实调一次 API |
-| `pkgtrans aim [语言]` | 设置 / 查看目标语言 |
-| `pkgtrans keyadd` | 添加 API Key |
-| `pkgtrans keylist` | 列出所有 Key 及当前优先项 |
-| `pkgtrans keyprefer [编号]` | 设置 / 查看优先使用的 Key |
-| `pkgtrans keyremove <编号>` | 删除某个 Key |
-| `pkgtrans keylock` | 锁定：只用优先 Key，不自动切换 |
-| `pkgtrans keyunlock` | 解锁：优先 Key 失败时自动切换备用 |
-| `pkgtrans setup [包管理器…]` | 为包管理器启用翻译（不带参数=查看状态，`all`=全部） |
-| `pkgtrans putes [包管理器…]` | 取消（setup 反过来写；`unsetup` 同义） |
-| `pkgtrans on` / `off` | 全局开启 / 关闭 |
-| `pkgtrans clear-cache` | 清空翻译缓存 |
-| `pkgtrans show-config` | 显示最终生效的配置 |
+| `pkgtrans` | **打开配置页**（等价于 `pkgtrans menu` / `ui` / `config`）|
+| `pkgtrans [选项] <命令> …` | 运行该命令并翻译其搜索结果；非搜索类调用原样透传 |
+| `pkgtrans [选项]` | 从标准输入读取结果并翻译（`apt search x \| pkgtrans`）|
+| `pkgtrans help` | 命令行帮助 |
+| `pkgtrans --version` / `-v` / `info` | 版本与开发者信息 |
 
-每个设置类命令都会给出明确回执，例如：
+配置页里能做的事（每一项都是一个二级界面）：
 
-```
-$ pkgtrans keyadd
-请选择服务商：
-   1) DeepSeek     deepseek-chat
-   2) Claude       claude-3-5-haiku-latest
-   ...
-   0) 其它（自己填地址和模型）
-选择 [1]: 1
-API Key（输入不回显）:
-  ✓ 已添加 DeepSeek 密钥 sk-*****f105a8（编号 1）
-    地址：https://api.deepseek.com/v1
-    模型：deepseek-chat
-    密钥库：~/.config/pkgtrans/keys.json（权限 600）
-```
+- **包管理器接管开关**：用不了的会标红锁定，选中时说明原因
+- **翻译总开关**：一键关掉，所有命令原样透传
+- **目标语言**：10 种预置或手填
+- **API Key**：添加 / 设为优先 / 删除 / 锁定
+- **自检**：打印生效配置并真调一次 API
+- **清空翻译缓存**
+- **安装包管理器**：Windows 装 winget、macOS 装 Homebrew，其它平台给命令
+- **查看最终配置** / **关于 · 帮助**
+
+> 以前那些 `keyadd` / `aim` / `setup` / `putes` / `on` / `off` / `check` /
+> `clear-cache` / `show-config` / `install-winget` 等命令已经全部收进配置页，
+> 不再作为独立命令提供。要恢复翻译功能，在配置页里把「翻译开关」勾上即可。
 
 ## 多密钥与自动回退
 
 ```
-$ pkgtrans keylist
+（在配置页的 API Key 界面里看）
  * 1 -> DeepSeek  |  sk-*****f105a8
    2 -> Claude    |  sk-ant-*****klmnop
 
@@ -291,34 +279,41 @@ $ pkgtrans keylist
 - `*` 标出当前优先的密钥。
 - 默认**不锁定**：优先密钥遇到 401/403 或连续失败，会自动改用下一个备用密钥重试，
   并在 stderr 提示 `切换过 N 次备用密钥`。这样一把密钥欠费/过期不会让整个工具瘫掉。
-- `pkgtrans keylock` 后只使用优先密钥（适合想严格控制成本、或不想把内容发给第二家服务商时）。
+- 在配置页里把 API Key **锁定**后只使用优先密钥（适合想严格控制成本、或不想把内容发给第二家服务商时）；解锁后优先 Key 失败会自动切换。
 - 密钥一律打码显示，`keylist` 不会回显完整密钥；密钥库文件权限 600。
 - 缓存按「协议 + 地址 + 模型 + 目标语言」做键，**与用哪个密钥无关**，换密钥不会让缓存失效。
 
 ## 目标语言
 
-```sh
-pkgtrans aim                 # 查询当前
-pkgtrans aim zh-hant         # 繁體中文
-pkgtrans aim zh-hans         # 简体中文
-pkgtrans aim ja-jpan         # 日本語
-pkgtrans aim ko-kore         # 한국어
-pkgtrans aim eo-latn         # 世界语（Esperanto）
-pkgtrans aim en-latn         # English
-pkgtrans aim default         # 恢复汉语（简体中文）
-pkgtrans aim 文言文           # 不认识的直接当语言名用
+在配置页里按 `Enter` 打开「目标语言」，`↑`/`↓` 选、`Enter` 确认：
+
+```
+ 目标语言
+ ❯ (*) 简体中文
+   ( ) 繁體中文
+   ( ) 日本語
+   ( ) 한국어
+   ( ) 世界语（Esperanto）
+   ( ) English
+   ( ) Français
+   ( ) Deutsch
+   ( ) Español
+   ( ) Русский
+   + 手动输入其它
+   返回
 ```
 
-`zh-hans` `zh-cn` `zh` 都映射到简体中文，`zh-hant` `zh-tw` `zh-hk` 都映射到繁體中文。
-缓存按语言分开存，来回切换不会串味，也不会重复花 token。
+「手动输入其它」可以填任意语言名（比如 `文言文`）或代码（`zh-hant` / `ja-jpan`）。
 
-## 交互式设置面板
-
-不想记子命令的话，直接开面板——**光标操作**：
+## 配置页
 
 ```sh
-pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
+pkgtrans            # 直接打开（等价于 pkgtrans menu / ui / config）
 ```
+
+**光标操作**：`↑`/`↓` 移动、`Space` 勾选、`Enter` 进入二级界面、`q` 退出。
+进菜单时会先清屏并切到备用屏幕缓冲区（和 `vim` / `less` 一样），退出后原来的
+终端内容和滚动历史原样回来。
 
 ```
 --------------------------------------------------------------
@@ -342,10 +337,14 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
    [×] winget       属于 Windows
 
  其它
+     翻译开关        已开启
      目标语言        简体中文
      API Key         1 个（DeepSeek）
+     自检（真调一次 API）
+     清空翻译缓存
      安装包管理器
      查看最终配置
+     关于 / 帮助
      退出
 
 --------------------------------------------------------------
@@ -354,7 +353,7 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
 
 **两个键分工明确，不混用：**
 
-| 按键 | 在包管理器行 | 在「其它」行 |
+| 按键 | 在复选框行（包管理器 / 翻译开关）| 在其它行 |
 | --- | --- | --- |
 | **Space** | 勾选 / 取消勾选（立刻落盘）| 提示「这一项要用 Enter 打开」|
 | **Enter** | 提示「用 Space 勾选 / 取消」| **进入二级界面 / 执行** |
@@ -368,14 +367,10 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
    brew 属于 macOS，当前系统是 Arch 系，用不了
 ```
 
-这样既不误导（一眼看出不可用），也不至于「藏起来让你以为没有」。
-
-进菜单时会先清屏（等价于执行 `clear`），并切到**备用屏幕缓冲区**——退出后原来的终端内容和滚动历史原样回来，和 `vim` / `less` 一样。
-
 ### 二级界面
 
-语言、API Key、安装、配置都是独立的一屏，`↑/↓` 移动、`Enter` 确认、`q` 返回
-（只回到主界面，不会退出程序）。
+语言、API Key、安装、配置、关于都是独立的一屏，`↑`/`↓` 移动、`Enter` 确认、
+`q` 返回（只回主界面，不会退出程序）。
 
 ```
  目标语言                          API Key
@@ -390,10 +385,11 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
  ↑/↓ 选择   Enter 确认   q 返回      ↑/↓ 移动   Enter 确认   q 返回
 ```
 
-- **目标语言**：单选，`Enter` 确认后立刻写进配置；选「手动输入其它」会切回行模式让你打字。
-- **API Key**：添加 / 设为优先 / 删除 / 锁定，选「添加」「设为优先」「删除」会再进一层让你挑编号或填密钥。
+- **目标语言**：单选，`Enter` 确认后立刻写进配置。
+- **API Key**：添加 / 设为优先 / 删除 / 锁定，选「添加」「设为优先」「删除」会再进一层挑编号或填密钥。
 - **安装包管理器**：Windows 一键装官方 App Installer、macOS 跑 Homebrew 官方脚本（都会先要一次确认），其它平台给出对应安装命令；AUR 才有的 `yay` / `paru` 单独说明。
 - **最终配置**：只读，`Enter` / `q` 返回。
+- **关于 / 帮助**：版本、开发者、用法速查。
 
 ### 没有终端时自动退回编号模式
 
@@ -401,62 +397,13 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
 「输入编号 + 回车」的纯文本模式，所以脚本里也能用：
 
 ```sh
-printf '3\nq\n' | pkgtrans menu     # 切换第 3 项再退出
-PSTRANS_PLAIN=1 pkgtrans menu         # 强制编号模式（屏幕阅读器 / 无障碍）
+printf '1\nq\n' | pkgtrans menu     # 切换第 1 个包管理器再退出
+PSTRANS_PLAIN=1 pkgtrans              # 强制编号模式（屏幕阅读器 / 无障碍）
 ```
 
 实现上不依赖 `curses`（Windows 的 stdlib 里没有），只用了 `termios`（POSIX）和
 `msvcrt`（Windows）读单个按键，读完立刻恢复终端，所以中间夹着的文本输入
 （比如粘贴 API Key）照常可用。
-
-## 包管理器 setup / putes
-
-```sh
-pkgtrans setup                 # 看状态表
-pkgtrans setup pamac flatpak   # 接管这两个
-pkgtrans setup apt flatpak     # Debian / Ubuntu
-pkgtrans setup dnf             # Fedora / RHEL
-pkgtrans setup brew            # macOS
-pkgtrans setup winget          # Windows
-pkgtrans setup all             # 接管所有已安装的
-pkgtrans putes pamac           # 取消 pamac（setup 反过来写）
-pkgtrans putes all             # 全部取消
-```
-
-表格**只列当前系统适用的命令**。在 Arch 上长这样：
-
-```
-  包管理器    已安装  已接管
-  pacman      ✓       ✓
-  yay         ✓       ✓
-  paru        -       -
-  pamac       ✓       ✓
-  flatpak     ✓       ✓
-```
-
-换到 Debian 上，`pacman` / `yay` / `paru` / `pamac` 就不会出现了：
-
-```
-  包管理器    已安装  已接管
-  apt         ✓       ✓
-  apt-cache   ✓       ✓
-  flatpak     -       -
-```
-
-规则是「本平台适用的 + 虽不适用但确实装了的」。所以：
-- Debian 上把 `pacman` 藏起来，不会误导人；
-- 但如果你真在 WSL 里装了个 `pacman`，它照样会出现在表里、也能被接管；
-- 反过来，`pkgtrans setup yay` 在 Debian 上会被明确拒绝，并告诉你本平台有哪些：
-
-```
-  ✗ yay 属于 Arch 系（Arch / Manjaro / EndeavourOS …），当前系统是 Debian 系（…）
-    本平台可用：apt, apt-cache, flatpak
-```
-
-配置里 `shell_targets` 的含义：留空 / `auto` = 所有已安装的；`none` = 一个都不接管；
-否则就是显式列表。**注意 `putes all` 会写成 `none` 而不是留空**，否则会被当成「未配置」而自动反弹回全接管。
-
-> 想覆盖自动判定（比如 WSL 里想按 arch 看），设 `PSTRANS_PLATFORM=arch` 即可。
 
 ## 用法（包装命令）
 
@@ -484,7 +431,7 @@ pkgtrans --lang 繁體中文 yay -Ss neovim
 apt search neovim | pkgtrans      # 管道过滤（自动识别 7 种方言）
 pkgtrans --dialect pamac < out.txt
 
-pkgtrans off                      # 全局关闭，一切原样透传
+pkgtrans                          # 配置页里关掉「翻译开关」，一切原样透传
 PSTRANS_DISABLE=1 pacman -Ss x    # 只关这一次
 ```
 
@@ -503,9 +450,9 @@ PSTRANS_DISABLE=1 pacman -Ss x    # 只关这一次
 
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
-| `target_lang` | 简体中文 | 目标语言（用 `pkgtrans aim` 改） |
-| `enabled` | 1 | 全局开关（用 `pkgtrans on/off` 改） |
-| `shell_targets` | auto | 接管哪些命令（用 `pkgtrans setup/putes` 改） |
+| `target_lang` | 简体中文 | 目标语言（配置页里改）|
+| `enabled` | 1 | 全局开关（配置页里改）|
+| `shell_targets` | auto | 接管哪些命令（配置页里勾选）|
 | `chunk_size` | 24 | 每次请求翻译多少条（批量更省 token） |
 | `concurrency` | 4 | 并发请求数 |
 | `max_items` | 300 | 单次最多翻译多少条，`0` = 不限 |
@@ -527,7 +474,7 @@ PSTRANS_DISABLE=1 pacman -Ss x    # 只关这一次
   Gemini（OpenAI 兼容端点）、Ollama、LM Studio、vLLM、one-api 中转站……
 - **`anthropic`**：Claude 官方接口
 
-`pkgtrans keyadd` 的菜单里预置了 11 家常用的，选 `0` 可以手填任意地址和模型。
+配置页「添加 API Key」里预置了 11 家常用的，选 `0` 可以手填任意地址和模型。
 没建密钥库时会自动探测这些环境变量：`DEEPSEEK_API_KEY` → `OPENAI_API_KEY` →
 `OPENROUTER_API_KEY` → `SILICONFLOW_API_KEY` → `DASHSCOPE_API_KEY` → `MOONSHOT_API_KEY` →
 `ZHIPUAI_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `ANTHROPIC_API_KEY` → `OLLAMA_HOST`。
@@ -558,7 +505,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 - 翻译失败 ≠ 命令失败。API 挂了照样输出完整包列表，退出码仍是原命令的退出码。
 - `pacman -Ssq` 这类没有描述的搜索输出逐字节不变（已验证）。
 - `flatpak list`、`flatpak --version`、`pamac list`、`pamac --version` 等透传输出逐字节一致（已验证）。
-- `pkgtrans off`、`--raw`、`PSTRANS_DISABLE=1` 三档绕过，粒度从全局到单次。
+- 配置页的「翻译开关」、`--raw`、`PSTRANS_DISABLE=1` 三档绕过，粒度从全局到单次。
 - 只增删 `.zshrc` 里 `# >>> pkgtrans >>>` … `# <<< pkgtrans <<<` 之间的一段，
   安装前自动备份，重复安装不会重复插入。
 - 输出编码全程按 UTF-8 字节处理，不受系统 locale 影响（本机 `LC_ALL` 是坏的，实测无碍）。
@@ -568,13 +515,13 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 
 **搜索出来还是英文？**
 三步排查：`type pacman` 看拦截是否生效（不是 function 就 `exec zsh` 或新开终端）；
-`pkgtrans check` 看密钥链路；`pkgtrans off` 过一次看是不是被全局关了。
+在配置页里点「自检」看密钥链路；把「翻译开关」关一次看看是不是被全局关了。
 
 **输出全是黄色？**
-没配好 API 或密钥失效。跑 `pkgtrans check`，它会直接告诉你是哪一环断了。
+没配好 API 或密钥失效。在配置页里点「自检」，它会直接告诉你是哪一环断了。
 
 **终端里看不到红/黄？**
-`pkgtrans check` 的「颜色标记」一行会说明原因。常见的是环境里设了 `NO_COLOR=1`
+配置页「自检」输出的「颜色标记」一行会说明原因。常见的是环境里设了 `NO_COLOR=1`
 （按规范它优先于一切配色设置），`unset NO_COLOR` 或配置里写 `force_color = 1` 即可。
 输出被管道/重定向时不着色是正常行为。
 
@@ -585,7 +532,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 一批默认 24 条、并发 4。结果多时把 `concurrency` 调到 6~8；本地 Ollama 建议 1~2。
 
 **怎么完全卸载？**
-`pkgtrans putes all` 取消接管，再删掉 `~/.local/bin/pkgtrans`、`~/.local/share/pkgtrans`、
+在配置页里把包管理器全部取消勾选，再删掉 `~/.local/bin/pkgtrans`、`~/.local/share/pkgtrans`、
 `~/.config/pkgtrans`、`~/.cache/pkgtrans` 和 `.zshrc` 里的标记段即可。
 
 ## 自测
@@ -594,7 +541,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **192 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **194 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分

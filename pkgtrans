@@ -796,32 +796,22 @@ HELP = f"""\
 翻译成功显示红色，失败显示黄色。
 
 用法:
-  {PROG} <子命令> [参数]                管理设置
+  {PROG}                                打开配置页
   {PROG} [选项] <命令> [命令参数...]     运行命令并翻译其搜索结果
   {PROG} [选项]                         从标准输入读取结果并翻译
 
 子命令:
   help                显示本帮助
   info, -v, --version 版本与开发者信息（大字图案）
-  check, status       自检：打印生效配置并真实调一次 API
-  aim [语言]          设置 / 查看目标语言（zh-hans zh-hant ja-jpan eo-latn …，
-                      不带参数=查看，default=简体中文）
-  keyadd              添加 API Key（交互式选服务商；也可
-                      `keyadd DeepSeek sk-xxx [模型]`）
-  keylist             列出所有 API Key 及当前优先项
-  keyprefer [编号]    设置 / 查看优先使用的 Key
-  keyremove <编号>    删除某个 Key
-  keylock             锁定：只用优先 Key，不自动切换
-  keyunlock           解锁：优先 Key 失败时自动切换备用
-  setup [包管理器…]   为包管理器启用翻译（不带参数=查看状态，all=全部）
-                      只列出本平台适用的命令，比如 Debian 上不会出现 yay
-  putes [包管理器…]   取消（setup 反过来写；unsetup 同义）
-  install-winget      仅 Windows：没装 winget 时自动下载安装官方 App Installer
-  menu                交互式设置面板（别名 ui / config）：包管理器开关、
-                      安装包管理器、目标语言、API Key，一个界面全搞定
-  on / off            全局开启 / 关闭
-  clear-cache         清空翻译缓存
-  show-config         显示最终生效的配置
+  menu                配置页（别名 ui / config；不带参数也直接进这里）
+
+配置页里能改的东西（↑/↓ 移动，Space 勾选，Enter 打开，q 退出）:
+  · 各包管理器的接管开关（不支持的会标红锁定，选中时说明原因）
+  · 目标语言、API Key（增删 / 优先 / 锁定）
+  · 翻译总开关、自检、清空缓存、查看最终配置、关于
+
+> 以前那些 keyadd / aim / setup / putes / on / off 等命令已经全部收进配置页，
+> 不再作为独立命令提供。
 
 包装命令时的选项:
   --lang <语言>       目标语言（默认 简体中文）
@@ -3033,12 +3023,50 @@ def menu_rows(st: Settings):
                "available": available}
         (usable if available else locked).append(row)
     return usable + locked + [
+        {"kind": "enabled"},
         {"kind": "lang"},
         {"kind": "keys"},
+        {"kind": "check"},
+        {"kind": "clear-cache"},
         {"kind": "install"},
         {"kind": "config"},
+        {"kind": "about"},
         {"kind": "quit"},
     ]
+
+
+def action_row(st: Settings, kind: str):
+    """「其它」区一行：返回 (标签, 右侧值, 是不是复选框)。"""
+    if kind == "enabled":
+        return "翻译开关", ("已开启" if as_bool(st["enabled"]) else "已关闭"), True
+    if kind == "lang":
+        return "目标语言", str(st["target_lang"]), False
+    if kind == "keys":
+        keys, preferred, _locked = load_keys(st.keys_path)
+        if not keys:
+            return "API Key", "未配置", False
+        first = next((k for k in keys if k.get("id") == preferred), keys[0])
+        return "API Key", f"{len(keys)} 个（{first.get('provider')}）", False
+    if kind == "check":
+        return "自检（真调一次 API）", "", False
+    if kind == "clear-cache":
+        return "清空翻译缓存", "", False
+    if kind == "install":
+        return "安装包管理器", "", False
+    if kind == "config":
+        return "查看最终配置", "", False
+    if kind == "about":
+        return "关于 / 帮助", "", False
+    return "退出", "", False
+
+
+def _toggle_enabled(st: Settings) -> str:
+    """切换全局翻译开关，返回给用户看的一句话。"""
+    turn_on = not as_bool(st["enabled"])
+    if not update_config_value(st.config_path, "enabled", "1" if turn_on else "0"):
+        return "写入配置失败"
+    st.set("enabled", "1" if turn_on else "0", "cli")
+    return "翻译已开启" if turn_on else "翻译已关闭，所有命令原样透传"
 
 
 def manager_block_reason(row) -> str:
@@ -3105,24 +3133,12 @@ def render_menu(st: Settings) -> None:
     for index, row in enumerate(rows, 1):
         if row["kind"] == "manager":
             continue
-        if row["kind"] == "lang":
-            label, value = "目标语言", str(st["target_lang"])
-        elif row["kind"] == "keys":
-            keys, preferred, _locked = load_keys(st.keys_path)
-            label = "API Key"
-            if keys:
-                first = next((k for k in keys if k.get("id") == preferred), keys[0])
-                value = f"{len(keys)} 个（{first.get('provider')}）"
-            else:
-                value = "未配置"
-        elif row["kind"] == "install":
-            label, value = "安装包管理器", ""
-        elif row["kind"] == "config":
-            label, value = "查看最终配置", ""
-        else:
+        if row["kind"] == "quit":
             lines.append("   q  退出")
             continue
-        lines.append(f" {index:>3}  {_pad(label, 14)} {value}".rstrip())
+        label, value, box = action_row(st, row["kind"])
+        prefix = ("[✓] " if as_bool(st["enabled"]) else "[ ] ") if box else ""
+        lines.append(f" {index:>3}  {_pad(prefix + label, 20)} {value}".rstrip())
 
     lines.append(MENU_RULE)
     write_stdout("\n".join(lines) + "\n")
@@ -3327,14 +3343,25 @@ def line_menu(st: Settings) -> int:
             message = _manager_toggle_or_warn(st, row)
             if not row.get("available", True):
                 warn(message)
+        elif row["kind"] == "enabled":
+            ok(_toggle_enabled(st))
         elif row["kind"] == "lang":
             menu_language(st)
         elif row["kind"] == "keys":
             menu_keys(st)
+        elif row["kind"] == "check":
+            do_check(st, {})
+        elif row["kind"] == "clear-cache":
+            do_clear_cache(st)
         elif row["kind"] == "install":
             menu_install(st)
         elif row["kind"] == "config":
             do_show_config(st)
+        elif row["kind"] == "about":
+            write_stdout(banner(PROG.upper()) + "\n")
+            note(f"版本 {__version__} · 开发者 {DEVELOPER} · 开发 {BUILT_WITH}")
+            note(f"More about Developer: {DEVELOPER_URL}")
+            note(f"`{PROG} help` 看命令行用法")
         elif row["kind"] == "quit":
             return 0
 
@@ -3482,21 +3509,16 @@ def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
                 box = (GREEN + "[✓]" + RESET) if row["active"] else (DIM + "[ ]" + RESET)
                 tail = "" if row["installed"] else DIM + "  未安装" + RESET
                 text = f"{box} {row['name']:<13}{tail}"
-        elif row["kind"] == "lang":
-            text = f"   目标语言        {st['target_lang']}"
-        elif row["kind"] == "keys":
-            keys, preferred, _locked = load_keys(st.keys_path)
-            if keys:
-                first = next((k for k in keys if k.get("id") == preferred), keys[0])
-                text = f"   API Key         {len(keys)} 个（{first.get('provider')}）"
-            else:
-                text = "   API Key         未配置"
-        elif row["kind"] == "install":
-            text = "   安装包管理器"
-        elif row["kind"] == "config":
-            text = "   查看最终配置"
         else:
-            text = "   退出"
+            label, value, box = action_row(st, row["kind"])
+            if row["kind"] == "quit":
+                text = "   退出"
+            elif box:
+                mark = (GREEN + "[✓]" + RESET) if as_bool(st["enabled"]) \
+                    else (DIM + "[ ]" + RESET)
+                text = f"{mark} {_pad(label, 14)}{DIM}{value}{RESET}"
+            else:
+                text = f"   {_pad(label, 18)}{value}"
         lines.append(_tui_row(i == focus, text)[:cols])
 
     lines.append(MENU_RULE)
@@ -3690,6 +3712,22 @@ def tui_config(st: Settings) -> None:
               footer=[""] + [f" {l}" for l in lines])
 
 
+def tui_about(st: Settings) -> None:
+    """二级界面：关于 / 用法速查。"""
+    lines = [""] + [" " + l for l in banner(PROG.upper()).splitlines()]
+    lines += ["", f" 版本 {__version__}",
+              f" 开发者 {DEVELOPER}",
+              f" 开发 {BUILT_WITH}",
+              f" More about Developer: {DEVELOPER_URL}",
+              "",
+              " 用法：",
+              f"   {PROG}                打开本配置页",
+              f"   {PROG} <命令> …        把该命令的搜索结果翻译后输出",
+              f"   {PROG} help             命令行帮助",
+              f"   {PROG} --version        版本信息"]
+    _tui_pick("关于 / 帮助", ["返回"], hint="Enter / q 返回", footer=lines)
+
+
 def tui_main(st: Settings) -> int:
     rows = menu_rows(st)
     focus = 0
@@ -3713,26 +3751,39 @@ def tui_main(st: Settings) -> int:
                 focus = (focus + 1) % len(rows)
                 continue
             row = rows[focus]
-            is_box = row["kind"] == "manager"
+            kind = row["kind"]
+            is_box = kind in ("manager", "enabled")
             # Space 只管勾选；Enter 只负责「进下一层 / 确认」，两者不再混用
             if key == "SPACE":
-                if is_box:
+                if kind == "manager":
                     status = _manager_toggle_or_warn(st, row)
+                elif kind == "enabled":
+                    status = _toggle_enabled(st)
                 else:
                     status = "这一项要用 Enter 打开"
             elif key == "ENTER":
-                if is_box:
+                if kind == "manager":
                     status = (manager_block_reason(row) if not row.get("available", True)
                               else f"{row['name']}：用 Space 勾选 / 取消")
-                elif row["kind"] == "lang":
+                elif kind == "enabled":
+                    status = "翻译开关：用 Space 勾选 / 取消"
+                elif kind == "lang":
                     tui_language(st)
-                elif row["kind"] == "keys":
+                elif kind == "keys":
                     tui_keys(st)
-                elif row["kind"] == "install":
+                elif kind == "check":
+                    do_check(st, {})
+                    tui_message("按任意键返回")
+                elif kind == "clear-cache":
+                    do_clear_cache(st)
+                    tui_message("按任意键返回")
+                elif kind == "install":
                     tui_install(st)
-                elif row["kind"] == "config":
+                elif kind == "config":
                     tui_config(st)
-                elif row["kind"] == "quit":
+                elif kind == "about":
+                    tui_about(st)
+                elif kind == "quit":
                     return 0
             else:
                 status = previous
@@ -3754,15 +3805,10 @@ def cmd_menu(st: Settings, args) -> int:
 
 # ------------------------------------------------------------------ 分发
 
-SUBCOMMANDS = {
-    "help", "info", "version", "check", "status",
-    "aim", "keylist", "keyadd", "keyremove", "keyprefer", "keylock", "keyunlock",
-    "setup", "putes", "putesy", "unsetup",
-    "install-winget",
-    "menu", "ui", "config",
-    "on", "off", "clear-cache", "show-config",
-    "install-shell", "uninstall-shell",
-}
+# 对外只剩四件事：help / --version / 配置页 / 包装调用。
+# 其余子命令（keyadd、aim、setup、putes、on、off、check…）都收进配置页了，
+# 内部函数仍然存在（配置页在调），只是不再作为命令暴露。
+SUBCOMMANDS = {"help", "info", "version", "menu", "ui", "config"}
 
 
 def dispatch_subcommand(name: str, rest):
@@ -3775,52 +3821,19 @@ def dispatch_subcommand(name: str, rest):
         return 0
     if name in ("info", "version"):
         return cmd_info(st)
-    if name in ("check", "status"):
-        return do_check(st, {})
-    if name == "aim":
-        return cmd_aim(st, rest)
-    if name == "keylist":
-        return cmd_keylist(st)
-    if name == "keyadd":
-        return cmd_keyadd(st, rest)
-    if name == "keyremove":
-        return cmd_keyremove(st, rest)
-    if name == "keyprefer":
-        return cmd_keyprefer(st, rest)
-    if name == "keylock":
-        return cmd_keylock(st, True)
-    if name == "keyunlock":
-        return cmd_keylock(st, False)
-    if name == "setup":
-        return cmd_setup(st, rest)
-    if name in ("putes", "putesy", "unsetup"):
-        return cmd_putes(st, rest)
-    if name == "install-winget":
-        return cmd_install_winget(st, rest)
-    if name in ("menu", "ui", "config"):
-        return cmd_menu(st, rest)
-    if name in ("on", "off"):
-        return cmd_onoff(st, name == "on")
-    if name == "clear-cache":
-        return do_clear_cache(st)
-    if name == "show-config":
-        return do_show_config(st)
-    if name == "install-shell":
-        shell = require_shell()
-        return 1 if shell is None else (0 if install_shell(shell, shell_targets(st)) else 1)
-    if name == "uninstall-shell":
-        shell = require_shell()
-        return 1 if shell is None else uninstall_shell(shell)
-    fail(f"未知子命令 {name}")
-    return 2
+    return cmd_menu(st, rest)
 
 
 def main(argv):
     setup_stdio()
     enable_ansi()
-    # 子命令优先：`pkgtrans setup pamac` 之类不会被当成要包装的命令
+    # 子命令优先：不会被当成要包装的命令
     if argv and argv[0] in SUBCOMMANDS:
         return dispatch_subcommand(argv[0], argv[1:])
+    # 不带参数、而且 stdio 都是终端 -> 直接开配置页。
+    # `cat out.txt | pkgtrans` 这种管道用法照旧走标准输入翻译。
+    if not argv and tui_available():
+        return cmd_menu(load_settings({}), [])
 
     try:
         cli, command, cmdargs = parse_args(argv)
