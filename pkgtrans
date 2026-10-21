@@ -3259,8 +3259,8 @@ def menu_install(st: Settings) -> None:
             fail(f"安装脚本退出码 {proc.returncode}")
 
 
-def cmd_menu(st: Settings, args) -> int:
-    """交互式设置面板：包管理器开关、安装、目标语言、API Key。"""
+def line_menu(st: Settings) -> int:
+    """编号模式：管道 / 测试 / 无终端时用（光标模式需要能读单个按键）。"""
     while True:
         render_menu(st)
         choice = _read_line(" 输入编号或 q 退出 > ")
@@ -3295,6 +3295,264 @@ def cmd_menu(st: Settings, args) -> int:
             do_show_config(st)
         elif row["kind"] == "quit":
             return 0
+
+
+# ---- 光标模式：↑/↓ 移动，Space/Enter 切换或打开，q 退出 ----
+
+TUI_BOLD = ESC + "1m"
+TUI_CYAN = ESC + "36m"
+TUI_CLR = ESC + "K"          # 清到行尾
+TUI_HOME = ESC + "H"         # 光标回左上角
+TUI_HIDE = ESC + "?25l"
+TUI_SHOW = ESC + "?25h"
+TUI_TAIL = ESC + "J"         # 清到屏幕末尾
+
+
+def tui_available() -> bool:
+    """能不能用光标模式：stdin / stdout 都得是终端，且不是 dumb 终端。
+
+    管道、重定向、CI 里都会自动退回编号模式；PSTRANS_PLAIN=1 可强制退回。
+    """
+    if os.environ.get("PSTRANS_PLAIN"):
+        return False
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if (os.environ.get("TERM") or "").lower() == "dumb":
+        return False
+    if os.name == "nt":
+        try:
+            import msvcrt  # noqa: F401
+        except ImportError:
+            return False
+        return True
+    try:
+        import termios  # noqa: F401
+        import tty       # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def read_key() -> str:
+    """读一个按键。
+
+    返回 UP / DOWN / LEFT / RIGHT / ENTER / SPACE / ESC / EOF，其余返回字符本身。
+    每次只把终端切成 raw 读一个键、读完立刻恢复——这样中间夹着的行模式
+    输入（比如让用户粘贴 API Key）还能正常工作。
+    """
+    if os.name == "nt":
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            return {"H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT"}.get(
+                msvcrt.getwch(), "")
+        if ch in ("\r", "\n"):
+            return "ENTER"
+        if ch == " ":
+            return "SPACE"
+        if ch == "\x1b":
+            return "ESC"
+        return ch
+    import select
+    import termios
+    import tty
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+    except (OSError, ValueError, termios.error):
+        return "EOF"
+    try:
+        tty.setraw(fd)
+        first = os.read(fd, 1)
+        if not first:
+            return "EOF"
+        if first == b"\x1b":
+            seq = b""
+            while len(seq) < 2:
+                ready, _, _ = select.select([fd], [], [], 0.03)
+                if not ready:
+                    break
+                seq += os.read(fd, 1)
+            return {b"[A": "UP", b"OA": "UP", b"[B": "DOWN", b"OB": "DOWN",
+                    b"[C": "RIGHT", b"OC": "RIGHT",
+                    b"[D": "LEFT", b"OD": "LEFT"}.get(seq, "ESC")
+        if first in (b"\r", b"\n"):
+            return "ENTER"
+        if first == b" ":
+            return "SPACE"
+        return first.decode("utf-8", "replace")
+    except OSError:
+        return "EOF"
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except (OSError, termios.error):
+            pass
+
+
+def _tui_row(focused: bool, text: str) -> str:
+    if focused:
+        return f" {TUI_BOLD}{TUI_CYAN}❯{RESET} {text}"
+    return f"   {text}"
+
+
+def _tui_paint(lines) -> None:
+    """整屏重画：光标归位 → 逐行写并清到行尾 → 清到屏幕末尾。"""
+    buf = [TUI_HIDE, TUI_HOME]
+    for line in lines:
+        buf.append(line + TUI_CLR + "\n")
+    buf.append(TUI_TAIL)
+    write_stdout("".join(buf))
+
+
+def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
+    cols = shutil.get_terminal_size((80, 24)).columns
+    header = f" {PROG} {__version__} · 设置"
+    lines = [MENU_RULE,
+             header + " " * max(1, 42 - display_width(header))
+             + PLATFORM_LABELS.get(current_platform(), ""),
+             MENU_RULE,
+             f" {_menu_summary(st)}",
+             ""]
+    section_added = False
+    for i, row in enumerate(rows):
+        if row["kind"] != "manager" and not section_added:
+            lines += ["", " 其它"]
+            section_added = True
+        if row["kind"] == "manager":
+            box = (GREEN + "[✓]" + RESET) if row["active"] else (DIM + "[ ]" + RESET)
+            tail = "" if row["installed"] else DIM + "  未安装" + RESET
+            text = f"{box} {row['name']:<13}{tail}"
+        elif row["kind"] == "lang":
+            text = f"   目标语言        {st['target_lang']}"
+        elif row["kind"] == "keys":
+            keys, preferred, _locked = load_keys(st.keys_path)
+            if keys:
+                first = next((k for k in keys if k.get("id") == preferred), keys[0])
+                text = f"   API Key         {len(keys)} 个（{first.get('provider')}）"
+            else:
+                text = "   API Key         未配置"
+        elif row["kind"] == "install":
+            text = "   安装包管理器"
+        elif row["kind"] == "config":
+            text = "   查看最终配置"
+        else:
+            text = "   退出"
+        lines.append(_tui_row(i == focus, text)[:cols])
+
+    shown = {r["name"] for r in rows if r["kind"] == "manager"}
+    hidden = [m for m in KNOWN_MANAGERS if m not in shown]
+    if hidden:
+        owners = sorted({MANAGER_META[m][0] for m in hidden})
+        lines += ["", f" 本平台不支持：{'、'.join(hidden)}",
+                  f"   （属于 {'、'.join(PLATFORM_SHORT.get(o, o) for o in owners)}）"]
+    lines.append(MENU_RULE)
+    if status:
+        lines.append(f" {GREEN}{status}{RESET}")
+    lines.append(f" {DIM}↑/↓ 移动   Space/Enter 切换或打开   q 退出{RESET}")
+    _tui_paint(lines)
+
+
+def tui_message(text: str) -> None:
+    """一屏提示，按任意键继续。"""
+    _tui_paint(["", f" {text}"])
+    read_key()
+
+
+def tui_language(st: Settings) -> None:
+    """语言单选：↑/↓ 移动，Enter 选定，q 取消。"""
+    current = str(st["target_lang"])
+    focus = next((i for i, (name, _c) in enumerate(MENU_LANG_CHOICES)
+                  if name == current), 0)
+    total = len(MENU_LANG_CHOICES) + 1          # 最后一档是「手动输入」
+    while True:
+        lines = ["", f" {TUI_BOLD}目标语言{RESET}",
+                 f" {DIM}↑/↓ 选择   Enter 确认   q 取消{RESET}", ""]
+        for i, (name, _code) in enumerate(MENU_LANG_CHOICES):
+            mark = (GREEN + "(*)" + RESET) if i == focus else (DIM + "( )" + RESET)
+            lines.append(_tui_row(i == focus, f"{mark} {name}"))
+        mark = (GREEN + "(*)" + RESET) if focus == total - 1 else (DIM + "( )" + RESET)
+        lines.append(_tui_row(focus == total - 1, f"{mark} 手动输入其它"))
+        _tui_paint(lines)
+        key = read_key()
+        if key in ("q", "Q", "ESC", "EOF"):
+            return
+        if key in ("UP", "k"):
+            focus = (focus - 1) % total
+        elif key in ("DOWN", "j"):
+            focus = (focus + 1) % total
+        elif key in ("ENTER", "SPACE"):
+            if focus == total - 1:
+                write_stdout(TUI_SHOW + "\n 输入语言名或代码（如 zh-hant / 日本語）> ")
+                try:
+                    custom = sys.stdin.readline().strip()
+                except (OSError, KeyboardInterrupt):
+                    return
+                if not custom:
+                    return
+                lang = resolve_language(custom)
+            else:
+                lang = resolve_language(MENU_LANG_CHOICES[focus][1])
+            if not lang:
+                return
+            if update_config_value(st.config_path, "target_lang", lang):
+                st.set("target_lang", lang, "cli")
+            return
+
+
+def tui_main(st: Settings) -> int:
+    rows = menu_rows(st)
+    focus = 0
+    status = ""
+    try:
+        while True:
+            rows = menu_rows(st)
+            focus = max(0, min(focus, len(rows) - 1))
+            tui_draw(st, rows, focus, status)
+            key = read_key()
+            previous = status
+            status = ""
+            if key in ("q", "Q", "ESC", "EOF"):
+                return 0
+            if key in ("UP", "k"):
+                focus = (focus - 1) % len(rows)
+            elif key in ("DOWN", "j"):
+                focus = (focus + 1) % len(rows)
+            elif key in ("ENTER", "SPACE"):
+                row = rows[focus]
+                if row["kind"] == "manager":
+                    _menu_toggle(st, row["name"])
+                    status = (f"{row['name']} 已取消接管" if row["active"]
+                              else f"{row['name']} 已接管")
+                elif row["kind"] == "lang":
+                    tui_language(st)
+                elif row["kind"] == "keys":
+                    menu_keys(st)          # 需要粘贴文本，走行模式
+                elif row["kind"] == "install":
+                    menu_install(st)
+                elif row["kind"] == "config":
+                    do_show_config(st)
+                    tui_message("按任意键返回")
+                elif row["kind"] == "quit":
+                    return 0
+            else:
+                status = previous
+    finally:
+        write_stdout(TUI_SHOW)
+
+
+def cmd_menu(st: Settings, args) -> int:
+    """设置面板：有终端时用光标操作复选框，管道 / 测试时退回编号模式。"""
+    if tui_available():
+        try:
+            return tui_main(st)
+        except KeyboardInterrupt:
+            write_stdout(TUI_SHOW)
+            return 0
+    return line_menu(st)
 
 
 # ------------------------------------------------------------------ 分发

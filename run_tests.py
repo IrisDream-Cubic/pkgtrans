@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 
 def _find_binary():
@@ -213,6 +214,75 @@ def run(args, stdin=None, env_extra=None, cache_file=None, style="openai",
     return (proc.returncode,
             proc.stdout.decode("utf-8", "replace"),
             proc.stderr.decode("utf-8", "replace"))
+
+
+def run_tty(args, keys, env_extra=None, config=None, keys_file=None, home=None,
+            settle=0.45):
+    """在伪终端里跑一次，模拟真实按键（光标模式只在真终端里启用）。
+
+    keys 是字节列表，比如 [b"\\x1b[B", b" ", b"q"]。
+    返回 (退出码, 全部输出)；平台没有 pty（Windows）时返回 (None, "")，调用方跳过。
+    """
+    try:
+        import pty
+    except ImportError:
+        return None, ""
+    env = dict(os.environ)
+    for key in list(env):
+        if key.endswith("_API_KEY") or key.startswith("PSTRANS_"):
+            env.pop(key, None)
+    env.update({
+        "PSTRANS_CONFIG": config or "/nonexistent/pkgtrans-test-config",
+        "PSTRANS_KEYS_FILE": keys_file or "/nonexistent/pkgtrans-test-keys.json",
+        "PSTRANS_CACHE": "0",
+        "PSTRANS_PLATFORM": "arch",
+        "SHELL": "/usr/bin/zsh",
+        # 光标模式要看到真终端；TERM=dumb 会被正确地判成「不支持」
+        "TERM": "xterm-256color",
+    })
+    if home:
+        env["HOME"] = home
+    if env_extra:
+        env.update(env_extra)
+
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([PKGTRANS] + args, stdin=slave, stdout=slave,
+                            stderr=slave, env=env, close_fds=True)
+    os.close(slave)
+    buf = bytearray()
+    done = threading.Event()
+
+    def drain():
+        while not done.is_set():
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    time.sleep(0.6)                     # 等首屏画出来
+    for key in keys:
+        try:
+            os.write(master, key)
+        except OSError:
+            break
+        time.sleep(settle)
+    try:
+        proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    time.sleep(0.2)
+    done.set()
+    try:
+        os.close(master)
+    except OSError:
+        pass
+    return proc.returncode, buf.decode("utf-8", "replace")
 
 
 def reset(mode="ok"):
@@ -1095,6 +1165,48 @@ if "search" in argv:
     code, out, err = run(["ui"], stdin=b"q\n", env_extra={"PSTRANS_PLATFORM": "arch"},
                          config=menu_cfg, keys=menu_keys, home=menu_home)
     check("menu：ui 别名可用", code == 0 and "包管理器" in plain(out), plain(out)[:200])
+
+    # ---------- 27. 光标模式（伪终端） ----------
+    print("[27] 光标模式（用 pty 模拟真实按键）")
+    tui_home = tempfile.mkdtemp(prefix="pkgtrans-tui-")
+    tui_cfg = os.path.join(tui_home, "config")
+    tui_keys = os.path.join(tui_home, "keys.json")
+
+    code, text = run_tty(["menu"], [b"\x1b[B", b" ", b"q"],
+                         config=tui_cfg, keys_file=tui_keys, home=tui_home)
+    if code is None:
+        print("  SKIP  当前平台没有 pty，跳过光标模式")
+    else:
+        check("光标模式：渲染出光标和复选框",
+              "❯" in text and "[✓]" in text and "[ ]" in text, text[-400:])
+        check("光标模式：给出按键提示", "↑/↓" in text, text[-200:])
+        check("光标模式：q 能退出，退出码 0", code == 0, code)
+        check("光标模式：↓ 到第 2 项后空格切换的是 yay", "yay 已" in text,
+              text[-300:])
+        saved = open(tui_cfg, encoding="utf-8").read() if os.path.exists(tui_cfg) else ""
+        check("光标模式：切换结果写进配置", "shell_targets" in saved, saved[:200])
+
+        # 包管理器行数不是固定的：平台命令 + 虽然不属于本平台但确实装了的
+        # （比如 Ubuntu runner 上装着的 apt / apt-cache），所以动态算。
+        os.environ["PSTRANS_PLATFORM"] = "arch"
+        try:
+            n_managers = len(mod.visible_managers())
+        finally:
+            os.environ.pop("PSTRANS_PLATFORM", None)
+
+        # 跳过所有包管理器行到「目标语言」：下移 N 次 + Enter 打开，
+        # 再下移到繁體中文 + Enter 确认，最后 q 退出
+        code, text = run_tty(["menu"],
+                             [b"\x1b[B"] * n_managers + [b"\r", b"\x1b[B", b"\r", b"q"],
+                             config=tui_cfg, keys_file=tui_keys, home=tui_home)
+        saved = open(tui_cfg, encoding="utf-8").read() if os.path.exists(tui_cfg) else ""
+        check("光标模式：语言屏能用方向键选中繁體中文",
+              "target_lang = 繁體中文" in saved, f"n={n_managers} {saved[:300]}")
+
+    code, out, err = run(["menu"], stdin=b"q\n",
+                         env_extra={"PSTRANS_PLAIN": "1"}, **common)
+    check("PSTRANS_PLAIN=1 强制退回编号模式（无障碍 / 屏幕阅读器）",
+          "输入编号" in plain(out), plain(out)[:200])
 
     print()
     print("=" * 62)
