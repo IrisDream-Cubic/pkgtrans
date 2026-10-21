@@ -1,5 +1,5 @@
 Name:           pkgtrans
-Version:        1.3
+Version:        1.3.0
 Release:        1%{?dist}
 Summary:        AI translation for package manager search results
 Summary(zh_CN): 用 AI 翻译包管理器搜索结果的描述文字

@@ -50,10 +50,11 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.3"
+__version__ = "1.3.0"
 DEVELOPER = "Toru Momose"
 DEVELOPER_URL = "https://iris-dream.top"
-BUILT_WITH = "DeepSeek v4 Pro"
+BUILT_WITH = "DeepSeek v4.1 Flash"
+PROJECT_URL = "https://github.com/IrisDream-Cubic/pkgtrans"
 
 PROG = "pkgtrans"
 
@@ -3128,6 +3129,17 @@ def _menu_colors(st: Settings):
             GREEN if color else "")
 
 
+def about_lines():
+    """「关于」界面的小字信息，顺序固定。"""
+    return [
+        f"开发：{DEVELOPER}",
+        f"版本：v{__version__}",
+        f"Coding with {BUILT_WITH}",
+        f"More about Me： {DEVELOPER_URL}",
+        f"本应用为开源软件（{PROJECT_URL}）",
+    ]
+
+
 def render_menu(st: Settings) -> None:
     """编号模式的主界面。"""
     plat = current_platform()
@@ -3143,6 +3155,8 @@ def render_menu(st: Settings) -> None:
               ""]
     rows = menu_rows(st)
     for index, row in enumerate(rows, 1):
+        if index > 1:
+            lines.append("")               # 每个选项之间空一行
         if row["kind"] == "quit":
             lines.append("   q  退出")
             continue
@@ -3178,17 +3192,6 @@ def render_managers(st: Settings) -> None:
                      + ("" if row["active"] else "未接管"))
     lines += ["", "    i  安装包管理器", "    q  返回"]
     lines.append(MENU_RULE)
-    write_stdout("\n".join(lines) + "\n")
-
-
-def render_about(st: Settings) -> None:
-    """编号模式的「关于」屏。"""
-    lines = [MENU_RULE, " 关于", "", f" {_menu_summary(st)}", ""]
-    for index, kind in enumerate(("enabled", "check", "config", "clear-cache"), 1):
-        label, value, box = action_row(st, kind)
-        prefix = ("[✓] " if as_bool(st["enabled"]) else "[ ] ") if box else ""
-        lines.append(f" {index:>3}  " + _pad(prefix + label, 20) + f" {value}".rstrip())
-    lines += ["   b  返回", MENU_RULE]
     write_stdout("\n".join(lines) + "\n")
 
 
@@ -3363,6 +3366,23 @@ def menu_install(st: Settings) -> None:
             fail(f"安装脚本退出码 {proc.returncode}")
 
 
+def render_about(st: Settings) -> None:
+    """编号模式的「关于」屏：大字 + 小字信息 + 更多操作。"""
+    color = want_color(st)
+    cyan = TUI_CYAN if color else ""
+    reset = RESET if color else ""
+    lines = [MENU_RULE]
+    lines += [f" {cyan}{row}{reset}" for row in banner(PROG.upper()).splitlines()]
+    lines += [""] + [f" {line}" for line in about_lines()]
+    lines += ["", " 更多"]
+    for index, kind in enumerate(("enabled", "check", "config", "clear-cache"), 1):
+        label, value, box = action_row(st, kind)
+        prefix = ("[✓] " if as_bool(st["enabled"]) else "[ ] ") if box else "   "
+        lines.append(f" {index:>3}  {_pad(prefix + label, 20)} {value}".rstrip())
+    lines += ["   b  返回", MENU_RULE]
+    write_stdout("\n".join(lines) + "\n")
+
+
 def line_managers(st: Settings) -> None:
     """编号模式的包管理器屏。"""
     while True:
@@ -3390,8 +3410,6 @@ def line_about(st: Settings) -> None:
     kinds = ("enabled", "check", "config", "clear-cache")
     while True:
         render_about(st)
-        note(f"{PROG} {__version__} · {DEVELOPER} · {BUILT_WITH}")
-        note(f"More about Developer: {DEVELOPER_URL}")
         choice = _read_line(" 输入编号，b 返回 > ")
         if choice is None or choice.strip().lower() in ("b", "q", ""):
             return
@@ -3576,6 +3594,8 @@ def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
               f" {_menu_summary(st)}",
               ""]
     for i, row in enumerate(rows):
+        if i:
+            lines.append("")               # 每个选项之间空一行
         label, value, box = action_row(st, row["kind"])
         if row["kind"] == "quit":
             text = "   退出"
@@ -3845,12 +3865,17 @@ def tui_config(st: Settings) -> None:
 
 
 def tui_about(st: Settings) -> None:
-    """二级界面：关于 + 几个杂项操作。"""
+    """二级界面：大字 + 小字信息 + 更多操作。"""
     kinds = ("enabled", "check", "config", "clear-cache")
     focus = 0
     status = ""
     while True:
-        lines = ["", " 关于", ""]
+        cols = shutil.get_terminal_size((80, 24)).columns
+        lines = [MENU_RULE]
+        lines += [f" {TUI_BOLD}{TUI_CYAN}{row}{RESET}"
+                  for row in banner(PROG.upper()).splitlines()]
+        lines += [""] + [f" {line}" for line in about_lines()]
+        lines += ["", f" {DIM}更多{RESET}"]
         for i, kind in enumerate(kinds):
             label, value, box = action_row(st, kind)
             if box:
@@ -3859,12 +3884,12 @@ def tui_about(st: Settings) -> None:
                 text = f"{mark} {_pad(label, 16)}{DIM}{value}{RESET}"
             else:
                 text = f"   {_pad(label, 18)}{value}"
-            lines.append(_tui_row(i == focus, text))
-        lines.append(_tui_row(focus == len(kinds), "   返回"))
-        lines += ["",
-                  f" {_pad(PROG + ' ' + __version__, 18)}{DEVELOPER}",
-                  f" {_pad('开发', 18)}{BUILT_WITH}",
-                  f" More about Developer: {DEVELOPER_URL}"]
+            lines.append(_tui_row(i == focus, text)[:cols])
+        lines.append(_tui_row(focus == len(kinds), "   返回")[:cols])
+        lines.append(MENU_RULE)
+        if status:
+            lines.append(f" {YELLOW}{status}{RESET}")
+        lines.append(f" {DIM}↑/↓ 移动   Space 勾选   Enter 打开   q 返回{RESET}")
         _tui_paint(lines)
         key = read_key()
         previous = status

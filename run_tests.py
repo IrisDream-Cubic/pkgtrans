@@ -855,7 +855,7 @@ if "search" in argv:
           and all(ord(c) < 128 for l in out.splitlines()[:5] for c in l),
           f"{out.splitlines()[:5]!r}"[:160])
     check("info：开发者/版本/开发/网址齐全",
-          "Toru Momose" in out and mod.__version__ in out and "DeepSeek v4 Pro" in out
+          "Toru Momose" in out and mod.__version__ in out and mod.BUILT_WITH in out
           and "https://iris-dream.top" in out, f"{out!r}"[:300])
     for flag in ("-v", "--version"):
         code, out, err = run([flag], **common)
@@ -995,7 +995,7 @@ if "search" in argv:
           len(vals) == 4 and len(set(vals.values())) == 1, str(found))
 
     # README 里的包文件名也带着版本号，同样容易漂
-    readme_vers = set(re.findall(r"pkgtrans[-_](\d+\.\d+)", readme))
+    readme_vers = set(re.findall(r"pkgtrans[-_](\d+\.\d+(?:\.\d+)?)", readme))
     check("README 里的包名版本与主程序一致",
           readme_vers and readme_vers == {found["pkgtrans"]}, str(readme_vers))
 
@@ -1180,6 +1180,9 @@ if "search" in argv:
           body[:500])
     check("主界面：标题是大字 banner",
           "_ __" in body and "|_|" in body, body[:400])
+    menu_part = body.split("包管理器        ")[0]
+    check("主界面：选项之间有空行",
+          "\n\n" in body.split("退出")[0].split("包管理器")[-1], body[:600])
     check("主界面：不直接列包管理器（已挪到二级界面）", "pacman" not in body, body[:500])
     check("主界面：包管理器一行显示接管进度", "个已接管" in body, body[:500])
 
@@ -1220,6 +1223,17 @@ if "search" in argv:
     stored = data.get("keys") or []
     check("主界面：能进 API Key 并添加",
           bool(stored) and stored[0].get("key") == "sk-menu-test", str(data)[:300])
+
+    code, out, err = menu2(stdin=b"5\nb\nq\n", path=with_bin)
+    body = plain(out)
+    check("关于屏：有 ASCII 大字", "|_|" in body and "_ __" in body, body[-900:])
+    check("关于屏：五行小字齐全且顺序正确",
+          all(w in body for w in ("开发：", "版本：v", "Coding with ",
+                                  "More about Me： ", "本应用为开源软件（")),
+          body[-900:])
+    check("关于屏：版本是 v1.3.0 这种三段式", f"版本：v{mod.__version__}" in body,
+          f"{mod.__version__}")
+    check("关于屏：带仓库地址", mod.PROJECT_URL in body, body[-600:])
 
     code, out, err = menu2(stdin=b"", path=with_bin)
     check("配置页：stdin 立刻 EOF 也能干净退出", code == 0, code)

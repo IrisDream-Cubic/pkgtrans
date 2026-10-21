@@ -81,7 +81,7 @@ makepkg -si
 或者直接从 Release 里下 `.pkg.tar.zst`：
 
 ```sh
-sudo pacman -U pkgtrans-1.3-1-any.pkg.tar.zst
+sudo pacman -U pkgtrans-1.3.0-1-any.pkg.tar.zst
 ```
 
 （AUR 上架后 `yay -S pkgtrans` 即可。）
@@ -129,17 +129,17 @@ winget show Neovim.Neovim                # 描述自动翻成中文
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install ./pkgtrans_1.3-1_all.deb
+sudo apt install ./pkgtrans_1.3.0-1_all.deb
 # 或
-sudo dpkg -i pkgtrans_1.3-1_all.deb
+sudo dpkg -i pkgtrans_1.3.0-1_all.deb
 ```
 
 ### Fedora / RHEL / openSUSE
 
 ```sh
-sudo rpm -ivh pkgtrans-1.3-1.noarch.rpm
+sudo rpm -ivh pkgtrans-1.3.0-1.noarch.rpm
 # 或
-sudo dnf install ./pkgtrans-1.3-1.noarch.rpm
+sudo dnf install ./pkgtrans-1.3.0-1.noarch.rpm
 ```
 
 ### Nix / NixOS
@@ -179,12 +179,12 @@ nix profile install github:IrisDream-Cubic/pkgtrans
 
 | 格式 | 文件 | 构建方式 |
 | --- | --- | --- |
-| Arch | `pkgtrans-1.3-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
-| deb | `pkgtrans_1.3-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
-| rpm | `pkgtrans-1.3-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
+| Arch | `pkgtrans-1.3.0-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
+| deb | `pkgtrans_1.3.0-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
+| rpm | `pkgtrans-1.3.0-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
 | Windows | `pkgtrans-windows-x64.exe` | 在 **windows-latest** 上用 PyInstaller 打成单文件（不能在 Linux 上交叉编译） |
-| winget 清单 | `pkgtrans-1.3-winget-manifests.tar.gz` | `packaging/make-winget-manifest.py`，用真实 exe 的 sha256 生成 |
-| 源码 | `pkgtrans-1.3.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
+| winget 清单 | `pkgtrans-1.3.0-winget-manifests.tar.gz` | `packaging/make-winget-manifest.py`，用真实 exe 的 sha256 生成 |
+| 源码 | `pkgtrans-1.3.0.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
 | Nix | *不发布 tarball* | flake 就是交付方式，见上面「Nix / NixOS」 |
 
 一次性全构建：
@@ -213,7 +213,7 @@ exe sha256，解包后把 `manifests/` 整个目录提到
 [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) 即可：
 
 ```sh
-tar -xzf pkgtrans-1.3-winget-manifests.tar.gz
+tar -xzf pkgtrans-1.3.0-winget-manifests.tar.gz
 # fork winget-pkgs，把 manifests/ 下的四级目录原样拷进去，开 PR
 ```
 
@@ -320,18 +320,49 @@ pkgtrans            # 直接打开（等价于 pkgtrans menu / ui / config）
  | .__/ | |\ \  \__, | \__| |_|    \__,_||_| |_||___/
  |_|    |_| \_\ |___/
 
- v1.3 · Arch 系（Arch / Manjaro / EndeavourOS …）
+ v1.3.0 · Arch 系（Arch / Manjaro / EndeavourOS …）
  翻译已开启 · 目标语言 简体中文 · API Key 未配置
 
  ❯ 包管理器         4/5 个已接管
+
    目标语言         简体中文
+
    API Key          未配置
+
    帮助
+
    关于
+
    退出
 
 --------------------------------------------------------------
  ↑/↓ 移动   Enter 打开   q 退出
+```
+
+「关于」里是**大字 + 五行小字**，下面再挂几个杂项操作：
+
+```
+--------------------------------------------------------------
+  _ __  | |__    __ _  _     _ __  __ _   _ __   ___
+ | '_ \ | / /   / _` || |_  | '__|/ _` | | '_ \ / __|
+ | |_) ||  \   | (_| ||  _| | |   | (_| || | | |\__ \
+ | .__/ | |\ \  \__, | \__| |_|    \__,_||_| |_||___/
+ |_|    |_| \_\ |___/
+
+ 开发：Toru Momose
+ 版本：v1.3.0
+ Coding with DeepSeek v4.1 Flash
+ More about Me： https://iris-dream.top
+ 本应用为开源软件（https://github.com/IrisDream-Cubic/pkgtrans）
+
+ 更多
+ ❯ [✓] 翻译开关         已开启
+   自检（真调一次 API）
+   查看最终配置
+   清空翻译缓存
+   返回
+--------------------------------------------------------------
+ ↑/↓ 移动   Space 勾选   Enter 打开   q 返回
 ```
 
 主界面只放入口，**包管理器的开关在二级界面里**：
@@ -544,7 +575,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **191 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **196 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
