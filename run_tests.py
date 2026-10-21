@@ -1187,6 +1187,11 @@ if "search" in argv:
     else:
         check("光标模式：渲染出光标和复选框",
               "❯" in text and "[✓]" in text and "[ ]" in text, text[-400:])
+        check("光标模式：进菜单前先清屏（等价于 clear）",
+              "\x1b[2J" in text and text.find("\x1b[2J") < text.find("包管理器"),
+              repr(text[:40]))
+        check("光标模式：用备用屏幕缓冲区，退出后原来的内容还回来",
+              "\x1b[?1049h" in text and "\x1b[?1049l" in text, repr(text[-40:]))
         check("光标模式：提示里把 Space 和 Enter 分开写",
               "Space" in text and "Enter" in text, text[-260:])
         check("光标模式：q 能退出，退出码 0", code == 0, code)

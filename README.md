@@ -353,6 +353,8 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
 | **Space** | 勾选 / 取消勾选（立刻落盘）| 提示「这一项要用 Enter 打开」|
 | **Enter** | 提示「用 Space 勾选 / 取消」| **进入二级界面 / 执行** |
 
+进菜单时会先清屏（等价于执行 `clear`），并切到**备用屏幕缓冲区**——退出后原来的终端内容和滚动历史原样回来，和 `vim` / `less` 一样。
+
 ### 二级界面
 
 语言、API Key、安装、配置都是独立的一屏，`↑/↓` 移动、`Enter` 确认、`q` 返回
@@ -575,7 +577,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **184 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **186 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分

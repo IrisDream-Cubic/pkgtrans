@@ -3313,6 +3313,11 @@ TUI_CLR = ESC + "K"          # 清到行尾
 TUI_HOME = ESC + "H"         # 光标回左上角
 TUI_HIDE = ESC + "?25l"
 TUI_SHOW = ESC + "?25h"
+# 进菜单前先清屏（等价于 `clear`）：2J 清屏 + H 归位。
+# 再用备用屏幕缓冲区（和 vim / less 一样），退出时把原来的内容原样还回去，
+# 不会把用户的滚动历史冲掉。
+TUI_SCREEN_ON = ESC + "?1049h" + ESC + "2J" + ESC + "H"
+TUI_SCREEN_OFF = ESC + "?25h" + ESC + "?1049l"
 TUI_TAIL = ESC + "J"         # 清到屏幕末尾
 
 
@@ -3652,6 +3657,8 @@ def tui_main(st: Settings) -> int:
     rows = menu_rows(st)
     focus = 0
     status = ""
+    # 进菜单前先清屏（相当于执行 clear），并切到备用屏幕缓冲区
+    write_stdout(TUI_SCREEN_ON)
     try:
         while True:
             rows = menu_rows(st)
@@ -3694,7 +3701,8 @@ def tui_main(st: Settings) -> int:
             else:
                 status = previous
     finally:
-        write_stdout(TUI_SHOW)
+        # 退出时切回原来的屏幕内容（光标也恢复显示）
+        write_stdout(TUI_SCREEN_OFF)
 
 
 def cmd_menu(st: Settings, args) -> int:
@@ -3703,7 +3711,7 @@ def cmd_menu(st: Settings, args) -> int:
         try:
             return tui_main(st)
         except KeyboardInterrupt:
-            write_stdout(TUI_SHOW)
+            write_stdout(TUI_SCREEN_OFF)      # 别把终端留在备用屏幕里
             return 0
     return line_menu(st)
 
