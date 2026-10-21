@@ -3235,35 +3235,34 @@ def menu_language(st: Settings) -> None:
 
 
 def menu_keys(st: Settings) -> None:
-    """编号模式：Key 列表 + 操作。输入编号 = 直接设为优先。"""
+    """编号模式：Key 列表 + 横排操作条。输入编号 = 直接设为优先。"""
     keys, preferred, locked = load_keys(st.keys_path)
     lines = ["", " API Key", ""]
     if keys:
-        width = max(len(str(k.get("provider", ""))) for k in keys)
+        width = max(display_width(str(k.get("provider", ""))) for k in keys)
         for k in keys:
-            mark = "*" if k.get("id") == preferred else " "
-            star = f"{mark}{(k.get('id')):>2}"
-            lines.append(f" {star}  {str(k.get('provider','')):<{width}}"
-                         f"  {mask_key(k.get('key',''))}"
-                         + ("   ← 当前优先" if k.get("id") == preferred else ""))
+            current = k.get("id") == preferred
+            name = _pad(str(k.get("provider", "")), width)
+            row = (f" *{(k.get('id')):>2}  {name}  {mask_key(k.get('key',''))}"
+                   if current else
+                   f"  {(k.get('id')):>2}  {name}  {mask_key(k.get('key',''))}")
+            lines.append(f" {YELLOW}{row}{RESET}" if current else f" {row}")
         first = next((k for k in keys if k.get("id") == preferred), keys[0])
         summary = (f"共 {len(keys)} 个，当前优先：{first.get('provider')}"
                    f"{'，已锁定' if locked else '，未锁定'}")
     else:
         lines.append("     （空，当前用配置文件 / 环境变量里的服务商）")
         summary = "还没有 API Key"
-    # 列表和操作之间空一行
-    lines += ["", "   a  添加 Key      d  删除 Key",
-              f"   l  {'解锁' if locked else '锁定'}            b  返回", "", f" {summary}"]
+    lock_label = "解锁" if locked else "锁定"
+    lines += ["",
+              f"   [a] 添加     [d] 删除     [r] 重命名     [l] {lock_label}     [b] 返回",
+              "", f" {summary}"]
     write_stdout("\n".join(lines) + "\n")
-    choice = (_read_line(" 输入编号设为优先，或选 a/d/l/b > ") or "").lower()
+    choice = (_read_line(" 输入编号设为优先，或选 [a]/[d]/[r]/[l]/[b] > ") or "").lower()
     if choice in ("", "b", "q"):
         return
     if choice.isdigit():
-        if not keys:
-            warn("还没有 Key")
-            return
-        if any(str(k.get("id")) == choice for k in keys):
+        if keys and any(str(k.get("id")) == choice for k in keys):
             cmd_keyprefer(st, [choice])
         else:
             warn(f"没有编号 {choice}")
@@ -3273,10 +3272,42 @@ def menu_keys(st: Settings) -> None:
         which = _read_line(" 删除哪个编号 > ") or ""
         if which.isdigit():
             cmd_keyremove(st, [which])
+    elif choice == "r":
+        if not keys:
+            warn("还没有 Key")
+            return
+        which = _read_line(" 重命名哪个编号 > ") or ""
+        if not which.isdigit():
+            return
+        target = next((k for k in keys if str(k.get("id")) == which), None)
+        if not target:
+            warn(f"没有编号 {which}")
+            return
+        new_name = _read_line(f" 新名字（原：{target.get('provider')}）> ") or ""
+        if not new_name:
+            note("已取消")
+            return
+        if rename_key(st, target.get("id"), new_name):
+            ok(f"已重命名为 {new_name}")
     elif choice == "l":
         cmd_keylock(st, not locked)
     else:
         warn("没有这个选项")
+
+
+def rename_key(st: Settings, key_id, new_name: str) -> bool:
+    """改某个 Key 的显示名（provider 字段，只影响展示）。"""
+    keys, preferred, locked = load_keys(st.keys_path)
+    hit = False
+    for k in keys:
+        if k.get("id") == key_id:
+            k["provider"] = new_name
+            hit = True
+            break
+    if not hit:
+        return False
+    save_keys(st.keys_path, keys, preferred, locked)
+    return True
 
 
 def menu_add_key(st: Settings) -> None:
@@ -3763,40 +3794,55 @@ def tui_language(st: Settings) -> None:
         return
 
 
+def _tui_bar(labels, pos, focused: bool) -> str:
+    """横排的方括号操作条。"""
+    parts = []
+    for i, label in enumerate(labels):
+        text = f"[ {label} ]"
+        if i == pos:
+            text = (f"{TUI_BOLD}{TUI_CYAN}{text}{RESET}" if focused
+                    else f"{DIM}{text}{RESET}")
+        parts.append(text)
+    return "   " + "  ".join(parts)
+
+
 def tui_keys(st: Settings) -> None:
     """二级界面：API Key 管理。
 
-    列表里的 Key 直接选中（Enter）= 设为优先，不再进第三层菜单。
-    列表和下面的操作之间空一行，读起来更清楚。
+    列表里的 Key 直接选中（Enter）= 设为优先；操作做成横排方括号。
     """
-    focus = 0
+    ACTIONS = ("添加", "删除", "重命名", "返回")
+    focus = 0            # 0..len(keys)-1 是 Key 行；len(keys) 是操作条
+    bar_pos = 0          # 操作条里选中的那个
     status = ""
+    named = 0            # 重命名针对的那个 Key（记住最后一次停在的 Key）
     while True:
         keys, preferred, locked = load_keys(st.keys_path)
-        entries = [("key", k) for k in keys]
-        entries += [("add", None), ("remove", None), ("lock", None), ("back", None)]
-        focus = max(0, min(focus, len(entries) - 1))
+        labels = (ACTIONS[0], ACTIONS[1], ACTIONS[2],
+                  "解锁" if locked else "锁定", ACTIONS[3])
+        total = len(keys) + 1
+        focus = max(0, min(focus, total - 1))
+        if focus < len(keys):
+            named = focus
         cols = shutil.get_terminal_size((80, 24)).columns
+        width = max((display_width(str(k.get("provider", ""))) for k in keys),
+                    default=8)
+
         lines = ["", f" {TUI_BOLD}API Key{RESET}", ""]
-        for i, (kind, item) in enumerate(entries):
-            if i == len(keys) and keys:
-                lines.append("")           # 列表与操作之间空一行
-            if kind == "key":
-                star = (GREEN + "*" + RESET) if item.get("id") == preferred else " "
-                text = (f"{star} {item.get('id'):>2}  "
-                        f"{str(item.get('provider','')):<12}"
-                        f"{DIM}{mask_key(item.get('key',''))}{RESET}")
-                if item.get("id") == preferred:
-                    text += f"  {GREEN}← 当前优先{RESET}"
+        for i, k in enumerate(keys):
+            current = k.get("id") == preferred
+            name = _pad(str(k.get("provider", "")), width)
+            body = f"{(k.get('id')):>2}  {name}  {mask_key(k.get('key',''))}"
+            if current:
+                text = f"{YELLOW}*{body}{RESET}"
             else:
-                text = "   " + {
-                    "add": "+ 添加 Key",
-                    "remove": "- 删除 Key",
-                    "lock": ("[解锁] 失败时自动切换备用" if locked
-                             else "[锁定] 只用优先 Key"),
-                    "back": "返回",
-                }[kind]
+                text = f" {body}"
             lines.append(_tui_row(i == focus, text)[:cols])
+        if not keys:
+            lines.append(f" {DIM}   （还没有 Key）{RESET}")
+        lines.append("")
+        lines.append(_tui_bar(labels, bar_pos, focus == len(keys))[:cols])
+
         first = next((k for k in keys if k.get("id") == preferred), keys[0]) if keys else None
         summary = (f"共 {len(keys)} 个，当前优先：{first.get('provider')}"
                    f"{'，已锁定' if locked else ''}" if keys
@@ -3804,7 +3850,8 @@ def tui_keys(st: Settings) -> None:
         lines += ["", f" {DIM}{summary}{RESET}"]
         if status:
             lines.append(f" {YELLOW}{status}{RESET}")
-        lines.append(f" {DIM}↑/↓ 移动   Enter 设为优先 / 执行   q 返回{RESET}")
+        lines.append(f" {DIM}↑/↓ 选 Key（Enter 设为优先）   → 操作条   "
+                     f"←/→ 换操作   q 返回{RESET}")
         _tui_paint(lines)
 
         key = read_key()
@@ -3812,21 +3859,33 @@ def tui_keys(st: Settings) -> None:
         if key in ("q", "Q", "ESC", "EOF"):
             return
         if key in ("UP", "k"):
-            focus = (focus - 1) % len(entries)
+            focus = (focus - 1) % total
             continue
         if key in ("DOWN", "j"):
-            focus = (focus + 1) % len(entries)
+            focus = (focus + 1) % total
             continue
-        kind, item = entries[focus]
-        if key == "SPACE":
-            status = "这一项要用 Enter 执行"
+        if focus < len(keys):
+            if key == "ENTER":
+                cmd_keyprefer(st, [str(keys[focus].get("id"))])
+                status = f"{keys[focus].get('provider')} 已设为优先"
+            elif key == "RIGHT":
+                focus = len(keys)
+            elif key == "SPACE":
+                status = "按 Enter 设为优先"
+            else:
+                status = previous
+            continue
+
+        # 在操作条上
+        if key in ("LEFT", "h"):
+            bar_pos = (bar_pos - 1) % len(labels)
+        elif key in ("RIGHT", "l"):
+            bar_pos = (bar_pos + 1) % len(labels)
         elif key == "ENTER":
-            if kind == "key":
-                cmd_keyprefer(st, [str(item.get("id"))])
-                status = f"{item.get('provider')} 已设为优先"
-            elif kind == "add":
+            action = labels[bar_pos]
+            if action == "添加":
                 menu_add_key(st)
-            elif kind == "remove":
+            elif action == "删除":
                 if not keys:
                     status = "还没有 Key"
                 else:
@@ -3834,7 +3893,17 @@ def tui_keys(st: Settings) -> None:
                         f"{k.get('id')}  {k.get('provider')}" for k in keys] + ["返回"])
                     if pick is not None and pick < len(keys):
                         cmd_keyremove(st, [str(keys[pick].get("id"))])
-            elif kind == "lock":
+            elif action == "重命名":
+                if not keys:
+                    status = "还没有 Key"
+                else:
+                    target = keys[min(named, len(keys) - 1)]
+                    write_stdout(TUI_SHOW + "\n")
+                    new_name = _tui_text_input(
+                        st, f"新名字（原：{target.get('provider')}）> ")
+                    if new_name and rename_key(st, target.get("id"), new_name):
+                        status = f"已重命名为 {new_name}"
+            elif action in ("锁定", "解锁"):
                 cmd_keylock(st, not locked)
             else:
                 return

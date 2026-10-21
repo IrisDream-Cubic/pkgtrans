@@ -1325,7 +1325,10 @@ if "search" in argv:
         # 密钥屏
         code, text, saved = tui_case([DOWN, DOWN, ENTER, Q, Q], "keys")
         check("光标模式：Enter 打开「API Key」二级界面",
-              "添加 Key" in text and "设为优先" in text, text[-500:])
+              "[ 添加 ]" in text and "设为优先" in text, text[-600:])
+        check("光标模式：操作是横排的方括号",
+              all(f"[ {w} ]" in text for w in ("添加", "删除", "重命名", "返回")),
+              text[-600:])
 
         # Key 屏：选中列表里的 Key 直接设为优先
         key_home = tempfile.mkdtemp(prefix="pkgtrans-tui-keys-")
@@ -1347,6 +1350,7 @@ if "search" in argv:
               saved["preferred"] == 2, f"preferred={saved['preferred']} {text[-200:]}")
         check("光标模式：Key 屏提示 Enter 是设为优先",
               "设为优先" in text, text[-300:])
+        check("光标模式：当前优先的 Key 标黄", "\x1b[33m" in text, text[-300:])
 
         # 帮助 / 关于
         code, text, saved = tui_case([DOWN, DOWN, DOWN, ENTER, Q, Q], "help")
