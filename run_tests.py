@@ -1178,6 +1178,8 @@ if "search" in argv:
     check("主界面：只有包管理器 / 目标语言 / API Key / 帮助 / 关于",
           all(w in body for w in ("包管理器", "目标语言", "API Key", "帮助", "关于")),
           body[:500])
+    check("主界面：标题是大字 banner",
+          "_ __" in body and "|_|" in body, body[:400])
     check("主界面：不直接列包管理器（已挪到二级界面）", "pacman" not in body, body[:500])
     check("主界面：包管理器一行显示接管进度", "个已接管" in body, body[:500])
 
@@ -1250,6 +1252,8 @@ if "search" in argv:
         print("  SKIP  当前平台没有 pty，跳过光标模式")
     else:
         check("光标模式：主界面渲染出光标", "❯" in text, text[-400:])
+        check("光标模式：主界面标题是大字 banner",
+              "|_|" in text and "_ __" in text, text[-900:])
         check("光标模式：进菜单前先清屏（等价于 clear）",
               "\x1b[2J" in text and text.find("\x1b[2J") < text.find("包管理器"),
               repr(text[:40]))

@@ -3131,13 +3131,16 @@ def _menu_colors(st: Settings):
 def render_menu(st: Settings) -> None:
     """编号模式的主界面。"""
     plat = current_platform()
-    header = f" {PROG} {__version__} · 设置"
-    pad = max(1, 40 - display_width(header))
-    lines = [MENU_RULE,
-             header + " " * pad + PLATFORM_LABELS.get(plat, plat),
-             MENU_RULE,
-             f" {_menu_summary(st)}",
-             ""]
+    color = want_color(st)
+    bold = TUI_BOLD if color else ""
+    cyan = TUI_CYAN if color else ""
+    reset = RESET if color else ""
+    lines = [MENU_RULE]
+    lines += [f" {cyan}{row}{reset}" for row in banner(PROG.upper()).splitlines()]
+    lines += ["",
+              f" {bold}v{__version__}{reset} · {PLATFORM_LABELS.get(plat, plat)}",
+              f" {_menu_summary(st)}",
+              ""]
     rows = menu_rows(st)
     for index, row in enumerate(rows, 1):
         if row["kind"] == "quit":
@@ -3564,13 +3567,14 @@ def _tui_paint(lines) -> None:
 def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
     """主界面：只有几个入口，包管理器在二级界面里。"""
     cols = shutil.get_terminal_size((80, 24)).columns
-    header = f" {PROG} {__version__} · 设置"
-    lines = [MENU_RULE,
-             header + " " * max(1, 42 - display_width(header))
-             + PLATFORM_LABELS.get(current_platform(), ""),
-             MENU_RULE,
-             f" {_menu_summary(st)}",
-             ""]
+    lines = [MENU_RULE]
+    lines += [f" {TUI_BOLD}{TUI_CYAN}{row}{RESET}"
+              for row in banner(PROG.upper()).splitlines()]
+    lines += ["",
+              f" {TUI_BOLD}v{__version__}{RESET} · "
+              f"{PLATFORM_LABELS.get(current_platform(), '')}",
+              f" {_menu_summary(st)}",
+              ""]
     for i, row in enumerate(rows):
         label, value, box = action_row(st, row["kind"])
         if row["kind"] == "quit":
