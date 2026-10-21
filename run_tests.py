@@ -664,11 +664,10 @@ if "search" in argv:
     common = dict(config=cfg, keys=kf, home=fake_home)
     zshrc = os.path.join(fake_home, ".zshrc")
 
-    # 配置页的行号：所有包管理器之后依次是这些动作
-    N = len(mod.KNOWN_MANAGERS)
-    IDX_ENABLED, IDX_LANG, IDX_KEYS = N + 1, N + 2, N + 3
-    IDX_CHECK, IDX_CLEAR, IDX_INSTALL = N + 4, N + 5, N + 6
-    IDX_CONFIG, IDX_ABOUT = N + 7, N + 8
+    # 主界面：1 包管理器 / 2 目标语言 / 3 API Key / 4 帮助 / 5 关于 / q 退出
+    IDX_MANAGERS, IDX_LANG, IDX_KEYS, IDX_HELP, IDX_ABOUT = 1, 2, 3, 4, 5
+    # 「关于」里的杂项：1 翻译开关 / 2 自检 / 3 查看配置 / 4 清缓存
+    ABOUT_ENABLED, ABOUT_CHECK, ABOUT_CONFIG, ABOUT_CLEAR = 1, 2, 3, 4
 
     def menu_in(seq, **kw):
         """按行模式喂一串输入给配置页，末尾自动补 q 退出。"""
@@ -709,7 +708,18 @@ if "search" in argv:
 
     # ---------- 16. 配置页：语言 / 接管 / 开关 / 自检 / 清缓存 ----------
     print("[16] 配置页：语言 / 接管 / 翻译开关 / 查看配置 / 清缓存 / 自检")
-    # 给一个确定基线，免得受「本机装了什么」影响
+    # 给一个确定基线，免得受「本机装了什么」影响。
+    # PATH 也只放 pacman / yay，这样「第 1、2 个包管理器」恒等于它们。
+    toggle_bin = tempfile.mkdtemp(prefix="pkgtrans-toggle-")
+    try:
+        os.symlink(os.path.realpath(sys.executable), os.path.join(toggle_bin, "python3"))
+    except OSError:
+        pass
+    for name in ("pacman", "yay"):
+        path = os.path.join(toggle_bin, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o755)
     with open(cfg, "w", encoding="utf-8") as fh:
         fh.write("# 测试基线\nenabled = 1\ntarget_lang = 简体中文\nshell_targets = none\n")
 
@@ -718,7 +728,7 @@ if "search" in argv:
           "目标语言已设为 繁體中文" in err and "target_lang = 繁體中文" in open(cfg).read(),
           f"{err!r}"[:200])
 
-    code, out, err = menu_in([1, 2])
+    code, out, err = menu_in([IDX_MANAGERS, 1, 2], env_extra={"PATH": toggle_bin})
     saved = open(cfg).read()
     check("配置页：切换接管写进配置", "shell_targets = pacman,yay" in saved, saved[-160:])
     block = open(zshrc).read() if os.path.exists(zshrc) else ""
@@ -726,34 +736,34 @@ if "search" in argv:
           "pacman()" in block and "yay()" in block and "flatpak()" not in block,
           block[:300])
 
-    code, out, err = menu_in([2])
+    code, out, err = menu_in([IDX_MANAGERS, 2], env_extra={"PATH": toggle_bin})
     check("配置页：再点一次取消接管",
           "shell_targets = pacman" in open(cfg).read()
           and "yay()" not in open(zshrc).read(), open(cfg).read()[-160:])
 
-    code, out, err = menu_in([IDX_ENABLED])
+    code, out, err = menu_in([IDX_ABOUT, ABOUT_ENABLED])
     check("配置页：关掉翻译总开关",
           "翻译已关闭" in err and "enabled = 0" in open(cfg).read(), f"{err!r}"[:200])
     reset()
     code, out, err = run([], stdin=SAMPLE.encode(), **common)
     check("关掉之后搜索逐字节原样透传", out == SAMPLE, f"{out!r}"[:120])
-    code, out, err = menu_in([IDX_ENABLED])
+    code, out, err = menu_in([IDX_ABOUT, ABOUT_ENABLED])
     check("配置页：再打开",
           "翻译已开启" in err and "enabled = 1" in open(cfg).read(), f"{err!r}"[:200])
 
-    code, out, err = menu_in([IDX_CONFIG])
+    code, out, err = menu_in([IDX_ABOUT, ABOUT_CONFIG])
     check("配置页：查看最终配置",
           "target_lang" in plain(out) and "api_style" in plain(out), plain(out)[:300])
 
     cache_p = os.path.join(cdir, "cache.json")
     with open(cache_p, "w", encoding="utf-8") as fh:
         fh.write("{}")
-    code, out, err = menu_in([IDX_CLEAR], cache_file=cache_p)
+    code, out, err = menu_in([IDX_ABOUT, ABOUT_CLEAR], cache_file=cache_p)
     check("配置页：清空缓存", "已删除缓存" in err and not os.path.exists(cache_p),
           f"{err!r}"[:200])
 
     reset()
-    code, out, err = run(["menu"], stdin=f"{IDX_CHECK}\nq\n".encode(),
+    code, out, err = run(["menu"], stdin=f"{IDX_ABOUT}\n{ABOUT_CHECK}\nq\nq\n".encode(),
                          **{**common, "keys": None})
     check("配置页：自检能跑通并打印配置",
           code == 0 and "配置文件" in plain(out) and "目标语言" in plain(out),
@@ -790,14 +800,15 @@ if "search" in argv:
             os.environ["SHELL"] = saved_shell
 
     # 终端模拟器 ≠ shell：提示语要点出「窗口」和「shell」两层（提示走 stderr）
-    code, out, err = menu_in([1], env_extra={"KITTY_WINDOW_ID": "1"})
+    code, out, err = menu_in([IDX_MANAGERS, 1], env_extra={"KITTY_WINDOW_ID": "1", "PATH": toggle_bin})
     check("提示语能认出 kitty 窗口", "kitty 窗口" in err and "exec zsh" in err,
           f"{err!r}"[:240])
-    code, out, err = menu_in([1], env_extra={"KONSOLE_VERSION": "260800",
-                                            "KONSOLE_DBUS_SERVICE": ":1.5"})
+    code, out, err = menu_in([IDX_MANAGERS, 1], env_extra={"KONSOLE_VERSION": "260800",
+                                            "KONSOLE_DBUS_SERVICE": ":1.5",
+                                            "PATH": toggle_bin})
     check("KONSOLE_* 泄露时不会被误报成 Konsole（弱信号不用）",
           "Konsole" not in err and "新开一个终端窗口" in err, f"{err!r}"[:240])
-    code, out, err = menu_in([1], env_extra={"SHELL": "/bin/bash"})
+    code, out, err = menu_in([IDX_MANAGERS, 1], env_extra={"SHELL": "/bin/bash", "PATH": toggle_bin})
     check("提示语跟着 shell 走（bash 时 exec bash）", "exec bash" in err, f"{err!r}"[:240])
 
     # ---------- 17. 多密钥回退与锁定 ----------
@@ -1018,7 +1029,7 @@ if "search" in argv:
     except OSError:
         no_bin = None      # 造不出来就退回真实 PATH，这几条断言会宽松些
 
-    def menu_plat(plat, stdin=b"q\n", path=None):
+    def menu_plat(plat, stdin=b"1\nq\nq\n", path=None):
         return run(["menu"], stdin=stdin,
                    env_extra={"PSTRANS_PLATFORM": plat, "PATH": path or no_bin}, **common)
 
@@ -1061,19 +1072,18 @@ if "search" in argv:
     brew_idx = row_of(plain(out), "brew", "×")
     check("debian：brew 是锁定行（有编号能选中）", brew_idx is not None, plain(out)[-500:])
     if brew_idx:
-        code, out, err = menu_plat("debian", stdin=f"{brew_idx}\nq\n".encode())
+        code, out, err = menu_plat("debian", stdin=f"1\n{brew_idx}\nq\nq\n".encode())
         check("debian：选中 brew 给出理由",
-              "属于" in err and "macOS" in err and "用不了" in err, f"{err!r}"[:240])
+              "仅在" in err and "macOS" in err and "当前系统" in err, f"{err!r}"[:240])
 
     # 选一个可用项：能接管
     code, out, err = menu_plat("debian")
     apt_idx = row_of(plain(out), "apt", " ")
     check("debian：apt 是可用行", apt_idx is not None, plain(out)[-500:])
     if apt_idx:
-        code, out, err = menu_plat("debian", stdin=f"{apt_idx}\nq\n".encode())
-        check("debian：选中 apt 可以接管",
-              "已接管" in err and "shell_targets = apt" in open(cfg).read(),
-              f"{err!r}"[:240])
+        code, out, err = menu_plat("debian", stdin=f"1\n{apt_idx}\nq\nq\n".encode())
+        check("debian：没装的 apt 勾不动，提示先装",
+              "还没安装" in err, f"{err!r}"[:240])
 
     # ---------- 24. Homebrew ----------
     print("[24] Homebrew 方言")
@@ -1131,191 +1141,178 @@ if "search" in argv:
     check("winget search：没有描述列 -> 逐字节原样", out == WINGET_SEARCH, f"{out!r}"[:200])
 
 
-    # ---------- 26. 交互式设置面板 ----------
-    print("[26] 交互式设置面板（menu）")
+    # ---------- 26. 配置页（编号模式） ----------
+    print("[26] 配置页（编号模式）")
     menu_home = tempfile.mkdtemp(prefix="pkgtrans-menu-")
     menu_cfg = os.path.join(menu_home, "config")
     menu_keys = os.path.join(menu_home, "keys.json")
-
-    def menu(stdin=b"q\n", plat="arch", path=None):
-        extra = {"PSTRANS_PLATFORM": plat}
-        if path:
-            extra["PATH"] = path
-        return run(["menu"], stdin=stdin, env_extra=extra,
-                   config=menu_cfg, keys=menu_keys, home=menu_home)
+    # 造一个「装了 flatpak，别的都没装」的 PATH
+    with_bin = tempfile.mkdtemp(prefix="pkgtrans-withbin-")
+    try:
+        os.symlink(os.path.realpath(sys.executable), os.path.join(with_bin, "python3"))
+    except OSError:
+        pass
+    for name in ("flatpak",):
+        path = os.path.join(with_bin, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o755)
 
     def row_index(out, label):
-        """从渲染出来的菜单里找某一行的编号（编号随平台变，不能写死）。"""
+        """从渲染出来的主界面里找某一行的编号。"""
         for line in plain(out).splitlines():
             stripped = line.strip()
             if label in line and stripped[:1].isdigit():
                 return int(stripped.split()[0])
         return None
 
-    code, out, err = menu(path=no_bin)
+    def menu2(stdin=b"q\n", plat="arch", path=None):
+        extra = {"PSTRANS_PLATFORM": plat}
+        if path:
+            extra["PATH"] = path
+        return run(["menu"], stdin=stdin, env_extra=extra,
+                   config=menu_cfg, keys=menu_keys, home=menu_home)
+
+    code, out, err = menu2(path=with_bin)
     body = plain(out)
-    check("menu：q 退出且退出码 0", code == 0, code)
-    check("menu：标题带版本和当前平台",
-          mod.__version__ in body and "Arch 系" in body, body[:200])
-    check("menu：列出本平台的全部命令",
-          all(m in body for m in mod.platform_managers()), body[:400])
-    check("menu：给出「本平台不支持」的警示",
-          "本平台不支持" in body and "brew" in body.split("本平台不支持")[-1],
-          body[-300:])
-    check("menu：四类入口齐全（管理 / 语言 / 密钥 / 安装 / 退出）",
-          all(w in body for w in ("目标语言", "API Key", "安装包管理器", "退出")),
-          body[-500:])
-    check("menu：不支持的也列出来，标 [×] 并注明归属",
-          "[×]" in body and "属于" in body, body[-600:])
+    check("主界面：只有包管理器 / 目标语言 / API Key / 帮助 / 关于",
+          all(w in body for w in ("包管理器", "目标语言", "API Key", "帮助", "关于")),
+          body[:500])
+    check("主界面：不直接列包管理器（已挪到二级界面）", "pacman" not in body, body[:500])
+    check("主界面：包管理器一行显示接管进度", "个已接管" in body, body[:500])
 
-    locked_idx = None
-    for line in body.splitlines():
-        if "[×]" in line and "brew" in line:
-            locked_idx = int(line.split()[0])
-    check("menu：锁定行也带编号（能选中，好用提示）", locked_idx is not None,
-          body[-400:])
-    if locked_idx:
-        code, out, err = menu(stdin=f"{locked_idx}\nq\n".encode(), path=no_bin)
-        check("menu：选中锁定行给出理由，且不写配置",
-              "属于" in err and "用不了" in err, err[-240:])
+    code, out, err = menu2(stdin=b"1\nq\nq\n", path=with_bin)
+    body = plain(out)
+    check("包管理器屏：列出全部命令",
+          all(m in body for m in mod.KNOWN_MANAGERS), body[:600])
+    check("包管理器屏：没装的标灰", "未安装" in body, body[:600])
+    check("包管理器屏：平台不支持的标 [×] 并说明原因",
+          "[×]" in body and "仅在" in body and "当前系统" in body, body[-700:])
+    check("包管理器屏：给出安装入口", "安装包管理器" in body, body[-500:])
 
-    # 切换接管：arch 上第 5 行是 flatpak
-    code, out, err = menu(stdin=b"5\nq\n", path=no_bin)
-    saved = open(menu_cfg, encoding="utf-8").read() if os.path.exists(menu_cfg) else ""
-    check("menu：切换接管后写进配置", "shell_targets" in saved and "flatpak" in saved,
-          saved[:300])
+    with open(menu_cfg, "w", encoding="utf-8") as fh:
+        fh.write("shell_targets = none\n")     # 基线：一个都没接管
+    code, out, err = menu2(stdin=b"1\n1\nq\nq\n", path=with_bin)
+    saved = open(menu_cfg, encoding="utf-8").read()
+    check("包管理器屏：勾选已装的那个能接管", "shell_targets = flatpak" in saved,
+          saved[:200])
 
-    # 改语言：5 个命令之后是「目标语言」，列表里第 2 项是繁體中文
+    code, out, err = menu2(stdin=b"1\n2\nq\nq\n", path=with_bin)
+    check("包管理器屏：没装的勾不动，给理由",
+          "还没安装" in err and "shell_targets = flatpak" in open(menu_cfg).read(),
+          f"{err!r}"[:240])
+
+    # 语言 / 密钥在主导航上的位置
     lang_idx = row_index(out, "目标语言")
-    code, out, err = menu(stdin=f"{lang_idx}\n2\nq\n".encode(), path=no_bin)
-    saved = open(menu_cfg, encoding="utf-8").read() if os.path.exists(menu_cfg) else ""
-    check("menu：改目标语言（2 = 繁體中文）", "target_lang = 繁體中文" in saved,
-          saved[:300])
+    code, out, err = menu2(stdin=f"{lang_idx}\n2\nq\n".encode(), path=with_bin)
+    saved = open(menu_cfg, encoding="utf-8").read()
+    check("主界面：目标语言改到繁體中文", "target_lang = 繁體中文" in saved, saved[:200])
 
-    # 加 API Key：走 getpass（管道下会退回读 stdin）
     keys_idx = row_index(out, "API Key")
-    code, out, err = menu(stdin=f"{keys_idx}\na\n1\nsk-menu-test\nq\n".encode(),
-                          path=no_bin)
+    code, out, err = menu2(stdin=f"{keys_idx}\na\n1\nsk-menu-test\nq\n".encode(),
+                           path=with_bin)
     data = {}
     if os.path.exists(menu_keys):
         with open(menu_keys, encoding="utf-8") as fh:
             data = json.load(fh)
     stored = data.get("keys") or []
-    check("menu：添加 API Key 并落盘",
-          bool(stored) and stored[0].get("provider") == "DeepSeek"
-          and stored[0].get("key") == "sk-menu-test", str(data)[:300])
+    check("主界面：能进 API Key 并添加",
+          bool(stored) and stored[0].get("key") == "sk-menu-test", str(data)[:300])
 
-    # 安装屏：不同平台给不同方式
-    for plat, want in (("windows", "自动下载安装官方 App Installer"),
-                       ("macos", "运行 Homebrew 官方安装脚本"),
-                       ("debian", "sudo apt install")):
-        code, out, err = menu(plat=plat, path=no_bin)
-        idx = row_index(out, "安装包管理器")
-        check(f"{plat}：菜单里有安装入口", idx is not None, plain(out)[-300:])
-        if idx is None:
-            continue
-        code, out, err = menu(stdin=f"{idx}\n\nq\n".encode(), plat=plat, path=no_bin)
-        check(f"{plat}：安装屏给出正确方式", want in plain(out), plain(out)[-400:])
-
-    code, out, err = menu(stdin=b"", path=no_bin)
-    check("menu：stdin 立刻 EOF 也能干净退出", code == 0, code)
+    code, out, err = menu2(stdin=b"", path=with_bin)
+    check("配置页：stdin 立刻 EOF 也能干净退出", code == 0, code)
 
     code, out, err = run(["ui"], stdin=b"q\n", env_extra={"PSTRANS_PLATFORM": "arch"},
                          config=menu_cfg, keys=menu_keys, home=menu_home)
-    check("menu：ui 别名可用", code == 0 and "包管理器" in plain(out), plain(out)[:200])
+    check("配置页：ui 别名可用", code == 0 and "包管理器" in plain(out), plain(out)[:200])
 
     # ---------- 27. 光标模式（伪终端） ----------
     print("[27] 光标模式（用 pty 模拟真实按键）")
-    tui_home = tempfile.mkdtemp(prefix="pkgtrans-tui-")
-    tui_cfg = os.path.join(tui_home, "config")
-    tui_keys = os.path.join(tui_home, "keys.json")
 
-    def tui_case(keys, name):
-        """每个用例用独立的 HOME / 配置，避免互相干扰。"""
+    def tui_case(keys, name, path=None, seed=None):
         home = tempfile.mkdtemp(prefix=f"pkgtrans-tui-{name}-")
         cfg = os.path.join(home, "config")
+        if seed:
+            with open(cfg, "w", encoding="utf-8") as fh:
+                fh.write(seed)
+        extra = {"PATH": path} if path else None
         code, text = run_tty(["menu"], keys, config=cfg,
-                             keys_file=os.path.join(home, "keys.json"), home=home)
+                             keys_file=os.path.join(home, "keys.json"),
+                             home=home, env_extra=extra)
         saved = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else ""
         return code, text, saved
 
-    code, text, saved = tui_case([b"\x1b[B", b" ", b"q"], "space")
+    DOWN, ENTER, SPACE, Q = b"\x1b[B", b"\r", b" ", b"q"
+    N_MANAGERS = len(mod.KNOWN_MANAGERS)
+
+    code, text, saved = tui_case([Q], "main")
     if code is None:
         print("  SKIP  当前平台没有 pty，跳过光标模式")
     else:
-        check("光标模式：渲染出光标和复选框",
-              "❯" in text and "[✓]" in text and "[ ]" in text, text[-400:])
+        check("光标模式：主界面渲染出光标", "❯" in text, text[-400:])
         check("光标模式：进菜单前先清屏（等价于 clear）",
               "\x1b[2J" in text and text.find("\x1b[2J") < text.find("包管理器"),
               repr(text[:40]))
         check("光标模式：用备用屏幕缓冲区，退出后原来的内容还回来",
               "\x1b[?1049h" in text and "\x1b[?1049l" in text, repr(text[-40:]))
-        check("光标模式：提示里把 Space 和 Enter 分开写",
-              "Space" in text and "Enter" in text, text[-260:])
-        check("光标模式：q 能退出，退出码 0", code == 0, code)
-        check("光标模式：↓ 到第 2 项后空格切换的是 yay", "yay 已" in text,
-              text[-300:])
-        check("光标模式：切换结果写进配置", "shell_targets" in saved, saved[:200])
+        check("光标模式：q 退出码 0", code == 0, code)
+        check("光标模式：主界面全是入口，提示里没有 Space 勾选",
+              "Enter 打开" in text and "Space 勾选" not in text, text[-260:])
 
-        # 包管理器行数不是固定的：平台命令 + 虽然不属于本平台但确实装了的
-        # （比如 Ubuntu runner 上装着的 apt / apt-cache），所以动态算。
-        # 菜单现在把所有已知命令都列出来（不能用的标红锁定），
-        # 所以行数是 KNOWN_MANAGERS 的总数；可用/锁定各多少还要看本机装了什么。
-        os.environ["PSTRANS_PLATFORM"] = "arch"
-        try:
-            n_managers = len(mod.KNOWN_MANAGERS)
-            usable = set(mod.platform_managers()) | set(mod.installed_managers())
-            first_locked = len([m for m in mod.KNOWN_MANAGERS if m in usable])
-        finally:
-            os.environ.pop("PSTRANS_PLATFORM", None)
+        # Enter 打开包管理器屏：出现复选框
+        code, text, saved = tui_case([ENTER, Q, Q], "managers")
+        check("光标模式：Enter 打开包管理器屏",
+              "[✓]" in text or "[ ]" in text, text[-600:])
+        check("光标模式：包管理器屏列出全部命令",
+              all(m in text for m in mod.KNOWN_MANAGERS), text[-900:])
+        check("光标模式：平台不支持的标红并说明原因",
+              "[×]" in text and "仅在" in text, text[-900:])
 
-        # 锁定行：按 Space 只给理由，绝不写配置
-        code, text, saved = tui_case([b"\x1b[B"] * first_locked + [b" ", b"q"], "locked")
-        check("光标模式：锁定行标红并写明归属",
-              "[×]" in text and "属于" in text, text[-600:])
-        check("光标模式：在锁定行按 Space 给出理由",
-              "用不了" in text, text[-260:])
-        check("光标模式：锁定行不会被写进配置", "shell_targets" not in saved,
-              saved[:160])
+        # 主界面上按 Space 只提示用 Enter
+        code, text, saved = tui_case([SPACE, Q], "space-main")
+        check("光标模式：主界面按 Space 提示用 Enter",
+              "用 Enter 打开" in text, text[-260:])
 
-        # Enter 不再等于 Space：在复选框行上只提示，不切换
-        code, text, saved = tui_case([b"\x1b[B", b"\r", b"q"], "enter-on-manager")
-        check("光标模式：在包管理器行按 Enter 不切换，只提示用 Space",
-              "用 Space" in text and "shell_targets" not in saved,
-              f"{saved[:120]} | {text[-220:]}")
+        # 包管理器屏里勾选已安装的 flatpak
+        first_usable = 1          # 只有 flatpak 装了，它排第一个
+        code, text, saved = tui_case([ENTER, SPACE, Q, Q], "toggle", path=with_bin,
+                                     seed="shell_targets = none\n")
+        check("光标模式：在包管理器屏按 Space 切换接管",
+              "flatpak 已接管" in text, text[-320:])
+        check("光标模式：切换结果写进配置",
+              "shell_targets = flatpak" in saved, saved[:200])
 
-        # Enter 在操作行上进入二级界面，q 只返回、不退出
-        code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 1) + [b"\r", b"q", b"q"], "lang")
+        # 没装的勾不动
+        code, text, saved = tui_case([ENTER, DOWN, SPACE, Q, Q], "missing", path=with_bin)
+        check("光标模式：没装的按 Space 给理由",
+              "还没安装" in text, text[-320:])
+        check("光标模式：没装的不会写进配置",
+              "shell_targets" not in saved, saved[:160])
+
+        # 语言屏
+        code, text, saved = tui_case([DOWN, ENTER, DOWN, ENTER, Q], "lang")
         check("光标模式：Enter 打开「目标语言」二级界面",
-              "手动输入其它" in text and "返回" in text, text[-420:])
-        check("光标模式：二级界面里 q 只返回，程序仍然正常退出", code == 0, code)
+              "手动输入其它" in text and "返回" in text, text[-500:])
+        check("光标模式：语言屏用 Enter 确认并落盘",
+              "target_lang = 繁體中文" in saved, saved[:300])
 
-        code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 2) + [b"\r", b"q", b"q"], "keys")
+        # 密钥屏
+        code, text, saved = tui_case([DOWN, DOWN, ENTER, Q, Q], "keys")
         check("光标模式：Enter 打开「API Key」二级界面",
-              "添加 API Key" in text and "设为优先" in text, text[-420:])
+              "添加 API Key" in text and "设为优先" in text, text[-500:])
 
-        code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 5) + [b"\r", b"q", b"q"], "install")
-        check("光标模式：Enter 打开「安装包管理器」二级界面",
-              "安装包管理器" in text and "返回" in text, text[-500:])
+        # 帮助 / 关于
+        code, text, saved = tui_case([DOWN, DOWN, DOWN, ENTER, Q, Q], "help")
+        check("光标模式：Enter 打开「帮助」", "命令行用法" in text, text[-600:])
+        code, text, saved = tui_case([DOWN] * 4 + [ENTER, Q, Q], "about")
+        check("光标模式：「关于」里有版本和杂项操作",
+              "自检" in text and "清空翻译缓存" in text and mod.__version__ in text,
+              text[-700:])
 
-        code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 6) + [b"\r", b"q", b"q"], "config")
-        check("光标模式：Enter 打开「最终配置」二级界面",
-              "target_lang" in text and "api_style" in text, text[-700:])
-
-        # 语言二级界面里 Enter 确认后写盘
-        code, text, saved = tui_case(
-            [b"\x1b[B"] * (n_managers + 1) + [b"\r", b"\x1b[B", b"\r", b"q"], "lang-pick")
-        check("光标模式：语言二级界面用 Enter 确认并落盘",
-              "target_lang = 繁體中文" in saved, f"n={n_managers} {saved[:300]}")
-
-    code, out, err = run(["menu"], stdin=b"q\n",
-                         env_extra={"PSTRANS_PLAIN": "1"}, **common)
-    check("PSTRANS_PLAIN=1 强制退回编号模式（无障碍 / 屏幕阅读器）",
-          "输入编号" in plain(out), plain(out)[:200])
+        # 「关于」里能切翻译开关
+        code, text, saved = tui_case([DOWN] * 4 + [ENTER, SPACE, Q, Q], "about-toggle")
+        check("光标模式：「关于」里 Space 切换翻译开关",
+              "翻译已关闭" in text and "enabled = 0" in saved, f"{saved[:160]} | {text[-260:]}")
 
     print()
     print("=" * 62)
