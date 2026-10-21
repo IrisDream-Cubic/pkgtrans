@@ -1120,6 +1120,19 @@ if "search" in argv:
     check("menu：四类入口齐全（管理 / 语言 / 密钥 / 安装 / 退出）",
           all(w in body for w in ("目标语言", "API Key", "安装包管理器", "退出")),
           body[-500:])
+    check("menu：不支持的也列出来，标 [×] 并注明归属",
+          "[×]" in body and "属于" in body, body[-600:])
+
+    locked_idx = None
+    for line in body.splitlines():
+        if "[×]" in line and "brew" in line:
+            locked_idx = int(line.split()[0])
+    check("menu：锁定行也带编号（能选中，好用提示）", locked_idx is not None,
+          body[-400:])
+    if locked_idx:
+        code, out, err = menu(stdin=f"{locked_idx}\nq\n".encode(), path=no_bin)
+        check("menu：选中锁定行给出理由，且不写配置",
+              "属于" in err and "用不了" in err, err[-240:])
 
     # 切换接管：arch 上第 5 行是 flatpak
     code, out, err = menu(stdin=b"5\nq\n", path=no_bin)
@@ -1201,11 +1214,24 @@ if "search" in argv:
 
         # 包管理器行数不是固定的：平台命令 + 虽然不属于本平台但确实装了的
         # （比如 Ubuntu runner 上装着的 apt / apt-cache），所以动态算。
+        # 菜单现在把所有已知命令都列出来（不能用的标红锁定），
+        # 所以行数是 KNOWN_MANAGERS 的总数；可用/锁定各多少还要看本机装了什么。
         os.environ["PSTRANS_PLATFORM"] = "arch"
         try:
-            n_managers = len(mod.visible_managers())
+            n_managers = len(mod.KNOWN_MANAGERS)
+            usable = set(mod.platform_managers()) | set(mod.installed_managers())
+            first_locked = len([m for m in mod.KNOWN_MANAGERS if m in usable])
         finally:
             os.environ.pop("PSTRANS_PLATFORM", None)
+
+        # 锁定行：按 Space 只给理由，绝不写配置
+        code, text, saved = tui_case([b"\x1b[B"] * first_locked + [b" ", b"q"], "locked")
+        check("光标模式：锁定行标红并写明归属",
+              "[×]" in text and "属于" in text, text[-600:])
+        check("光标模式：在锁定行按 Space 给出理由",
+              "用不了" in text, text[-260:])
+        check("光标模式：锁定行不会被写进配置", "shell_targets" not in saved,
+              saved[:160])
 
         # Enter 不再等于 Space：在复选框行上只提示，不切换
         code, text, saved = tui_case([b"\x1b[B", b"\r", b"q"], "enter-on-manager")

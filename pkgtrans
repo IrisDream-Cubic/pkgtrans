@@ -3016,19 +3016,44 @@ def _read_line(prompt_text):
 
 
 def menu_rows(st: Settings):
-    """菜单的行（纯数据，渲染和测试共用）。"""
+    """菜单的行（纯数据，渲染和测试共用）。
+
+    所有已知包管理器都会出现：本平台能用的在前，用不了的排在后面并标
+    `available=False`，渲染成红色锁定态——看得见、但选不动，选中时给理由。
+    """
     installed = set(installed_managers())
     active = set(shell_targets(st))
-    rows = []
-    for name in visible_managers():
-        rows.append({"kind": "manager", "name": name,
-                     "installed": name in installed, "active": name in active})
-    rows.append({"kind": "lang"})
-    rows.append({"kind": "keys"})
-    rows.append({"kind": "install"})
-    rows.append({"kind": "config"})
-    rows.append({"kind": "quit"})
-    return rows
+    plat = current_platform()
+    usable, locked = [], []
+    for name in KNOWN_MANAGERS:
+        owner = MANAGER_META[name][0]
+        available = owner in (plat, "any") or name in installed
+        row = {"kind": "manager", "name": name, "owner": owner,
+               "installed": name in installed, "active": name in active,
+               "available": available}
+        (usable if available else locked).append(row)
+    return usable + locked + [
+        {"kind": "lang"},
+        {"kind": "keys"},
+        {"kind": "install"},
+        {"kind": "config"},
+        {"kind": "quit"},
+    ]
+
+
+def manager_block_reason(row) -> str:
+    """不能用的包管理器为什么不能用。"""
+    owner = PLATFORM_SHORT.get(row.get("owner", ""), row.get("owner", ""))
+    here = PLATFORM_SHORT.get(current_platform(), current_platform())
+    return f"{row['name']} 属于 {owner}，当前系统是 {here}，用不了"
+
+
+def _manager_toggle_or_warn(st: Settings, row) -> str:
+    """切换接管；平台不支持时返回提示文字（什么都不改）。"""
+    if not row.get("available", True):
+        return manager_block_reason(row)
+    _menu_toggle(st, row["name"])
+    return (f"{row['name']} 已取消接管" if row["active"] else f"{row['name']} 已接管")
 
 
 def _menu_summary(st: Settings) -> str:
@@ -3055,12 +3080,26 @@ def render_menu(st: Settings) -> None:
              f" {_menu_summary(st)}",
              "",
              " 包管理器（输入编号切换接管）"]
+    # 管道 / 重定向时不着色（和翻译输出遵循同一套判断）
+    color = want_color(st)
+    red = RED if color else ""
+    dim = DIM if color else ""
+    reset = RESET if color else ""
+    locked_header = False
     for index, row in enumerate(rows, 1):
         if row["kind"] != "manager":
             continue
+        if not row["available"] and not locked_header:
+            lines += ["", f" {dim}本平台不支持（已锁定，选不中）{reset}"]
+            locked_header = True
+        if not row["available"]:
+            owner = PLATFORM_SHORT.get(row["owner"], row["owner"])
+            lines.append(f" {index:>3}  {red}[×]{reset} {dim}{row['name']:<12}{reset}"
+                         f" {dim}属于 {owner}{reset}")
+            continue
         mark = "✓ 已接管" if row["active"] else "  未接管"
         state = "已安装" if row["installed"] else "未安装"
-        lines.append(f" {index:>3}  {row['name']:<12} {state}  {mark}")
+        lines.append(f" {index:>3}  [ ] {row['name']:<12} {state}  {mark}")
 
     lines += ["", " 其它"]
     for index, row in enumerate(rows, 1):
@@ -3085,13 +3124,6 @@ def render_menu(st: Settings) -> None:
             continue
         lines.append(f" {index:>3}  {_pad(label, 14)} {value}".rstrip())
 
-    shown = {r["name"] for r in rows if r["kind"] == "manager"}
-    hidden = [m for m in KNOWN_MANAGERS if m not in shown]
-    if hidden:
-        owners = sorted({MANAGER_META[m][0] for m in hidden})
-        lines += ["",
-                  f" 本平台不支持：{'、'.join(hidden)}",
-                  f"   （属于 {'、'.join(PLATFORM_SHORT.get(o, o) for o in owners)}）"]
     lines.append(MENU_RULE)
     write_stdout("\n".join(lines) + "\n")
 
@@ -3292,7 +3324,9 @@ def line_menu(st: Settings) -> int:
             continue
         row = rows[index - 1]
         if row["kind"] == "manager":
-            _menu_toggle(st, row["name"])
+            message = _manager_toggle_or_warn(st, row)
+            if not row.get("available", True):
+                warn(message)
         elif row["kind"] == "lang":
             menu_language(st)
         elif row["kind"] == "keys":
@@ -3431,14 +3465,23 @@ def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
              f" {_menu_summary(st)}",
              ""]
     section_added = False
+    locked_header = False
     for i, row in enumerate(rows):
         if row["kind"] != "manager" and not section_added:
             lines += ["", " 其它"]
             section_added = True
         if row["kind"] == "manager":
-            box = (GREEN + "[✓]" + RESET) if row["active"] else (DIM + "[ ]" + RESET)
-            tail = "" if row["installed"] else DIM + "  未安装" + RESET
-            text = f"{box} {row['name']:<13}{tail}"
+            if not row["available"]:
+                if not locked_header:
+                    lines += ["", f" {DIM}本平台不支持（已锁定，选不中）{RESET}"]
+                    locked_header = True
+                owner = PLATFORM_SHORT.get(row["owner"], row["owner"])
+                text = (f"{RED}[×]{RESET} {RED}{row['name']:<13}{RESET}"
+                        f"{DIM}属于 {owner}{RESET}")
+            else:
+                box = (GREEN + "[✓]" + RESET) if row["active"] else (DIM + "[ ]" + RESET)
+                tail = "" if row["installed"] else DIM + "  未安装" + RESET
+                text = f"{box} {row['name']:<13}{tail}"
         elif row["kind"] == "lang":
             text = f"   目标语言        {st['target_lang']}"
         elif row["kind"] == "keys":
@@ -3456,15 +3499,9 @@ def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
             text = "   退出"
         lines.append(_tui_row(i == focus, text)[:cols])
 
-    shown = {r["name"] for r in rows if r["kind"] == "manager"}
-    hidden = [m for m in KNOWN_MANAGERS if m not in shown]
-    if hidden:
-        owners = sorted({MANAGER_META[m][0] for m in hidden})
-        lines += ["", f" 本平台不支持：{'、'.join(hidden)}",
-                  f"   （属于 {'、'.join(PLATFORM_SHORT.get(o, o) for o in owners)}）"]
     lines.append(MENU_RULE)
     if status:
-        lines.append(f" {GREEN}{status}{RESET}")
+        lines.append(f" {YELLOW}{status}{RESET}")
     lines.append(f" {DIM}↑/↓ 移动   Space 勾选   Enter 打开   q 退出{RESET}")
     _tui_paint(lines)
 
@@ -3680,14 +3717,13 @@ def tui_main(st: Settings) -> int:
             # Space 只管勾选；Enter 只负责「进下一层 / 确认」，两者不再混用
             if key == "SPACE":
                 if is_box:
-                    _menu_toggle(st, row["name"])
-                    status = (f"{row['name']} 已取消接管" if row["active"]
-                              else f"{row['name']} 已接管")
+                    status = _manager_toggle_or_warn(st, row)
                 else:
                     status = "这一项要用 Enter 打开"
             elif key == "ENTER":
                 if is_box:
-                    status = f"{row['name']}：用 Space 勾选 / 取消"
+                    status = (manager_block_reason(row) if not row.get("available", True)
+                              else f"{row['name']}：用 Space 勾选 / 取消")
                 elif row["kind"] == "lang":
                     tui_language(st)
                 elif row["kind"] == "keys":

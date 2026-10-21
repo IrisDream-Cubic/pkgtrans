@@ -332,6 +332,14 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
    [ ] paru           未安装
    [✓] pamac
    [✓] flatpak
+ 本平台不支持（已锁定，选不中）
+   [×] apt          属于 Debian 系
+   [×] apt-cache    属于 Debian 系
+   [×] dnf          属于 Fedora 系
+   [×] yum          属于 Fedora 系
+   [×] zypper       属于 openSUSE
+   [×] brew         属于 macOS
+   [×] winget       属于 Windows
 
  其它
      目标语言        简体中文
@@ -340,8 +348,6 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
      查看最终配置
      退出
 
- 本平台不支持：apt、apt-cache、dnf、yum、zypper、brew、winget
-   （属于 Debian 系、Fedora 系、macOS、openSUSE、Windows）
 --------------------------------------------------------------
  ↑/↓ 移动   Space 勾选   Enter 打开   q 退出
 ```
@@ -352,6 +358,17 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
 | --- | --- | --- |
 | **Space** | 勾选 / 取消勾选（立刻落盘）| 提示「这一项要用 Enter 打开」|
 | **Enter** | 提示「用 Space 勾选 / 取消」| **进入二级界面 / 执行** |
+
+**不支持的包管理器也照样列在表里**，但整行标红、复选框显示成 `[×]`、下面注明它属于
+哪个平台；光标可以停上去，按 Space / Enter 只会得到一句原因，不会改动任何配置：
+
+```
+   [×] brew         属于 macOS
+   ...
+   brew 属于 macOS，当前系统是 Arch 系，用不了
+```
+
+这样既不误导（一眼看出不可用），也不至于「藏起来让你以为没有」。
 
 进菜单时会先清屏（等价于执行 `clear`），并切到**备用屏幕缓冲区**——退出后原来的终端内容和滚动历史原样回来，和 `vim` / `less` 一样。
 
@@ -577,7 +594,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **186 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **192 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
@@ -588,7 +605,7 @@ python3 ~/.local/share/pkgtrans/run_tests.py
   失败时逐字节还原
 - 平台感知：六种平台各自该显示哪些命令、跨平台接管被拒绝、`PSTRANS_PLATFORM` 覆盖
 - 设置面板：`menu` 编号模式渲染、切换接管、改目标语言、加 API Key、各平台的安装入口与「本平台不支持」警示、EOF 干净退出；
-  **光标模式用 pty 模拟真实按键测**（↑/↓ 移动、Space 勾选、Enter 进二级界面、二级界面里 q 只返回、语言单选落盘、`PSTRANS_PLAIN` 退回）
+  **光标模式用 pty 模拟真实按键测**（↑/↓ 移动、Space 勾选、Enter 进二级界面、锁定行只提示不落盘、二级界面里 q 只返回、语言单选落盘、`PSTRANS_PLAIN` 退回）
 - 子命令：`keyadd/keylist/keyprefer/keyremove/keylock/keyunlock`、
   `aim`（含 `zh-hant` `eo-latn` `default`）、`on/off`、`setup/putes/putesy`、
   `install-winget`、`info`、`help`
