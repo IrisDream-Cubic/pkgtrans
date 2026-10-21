@@ -1,5 +1,5 @@
 Name:           pkgtrans
-Version:        1.2
+Version:        1.3
 Release:        1%{?dist}
 Summary:        AI translation for package manager search results
 Summary(zh_CN): 用 AI 翻译包管理器搜索结果的描述文字
@@ -52,6 +52,16 @@ install -Dpm0644 packaging/_pkgtrans \
 %license LICENSE
 
 %changelog
+* Wed Oct 21 2026 Toru Momose <iris@iris-dream.top> - 1.3-1
+- 新增交互式设置面板 `pkgtrans menu`（别名 ui / config）：包管理器开关、
+  安装包管理器、目标语言、API Key 都在一个界面里改
+- 安装屏按平台给路径：Windows 一键装官方 App Installer，macOS 跑 Homebrew
+  官方脚本，其它平台给对应安装命令；本平台不支持的命令单独警示
+- 修复：Windows 上输出被管道接走时中文会抛 UnicodeEncodeError
+- 修复：rpmbuild 的 %check 在缺 git 的环境里会崩
+- 修复：源码包不带参数构建时版本号为空（pkgtrans-.tar.gz）
+- 修复：`pkgtrans setup | head` 的退出码是 120
+
 * Tue Oct 20 2026 Toru Momose <iris@iris-dream.top> - 1.2-1
 - 按平台过滤包管理器：dnf 系上不再显示 pacman / yay / apt 等不相干的命令
 - 新增 Homebrew（macOS）：brew info 的描述行、brew search --desc 的描述

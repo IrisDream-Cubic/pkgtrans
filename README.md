@@ -81,7 +81,7 @@ makepkg -si
 或者直接从 Release 里下 `.pkg.tar.zst`：
 
 ```sh
-sudo pacman -U pkgtrans-1.2-1-any.pkg.tar.zst
+sudo pacman -U pkgtrans-1.3-1-any.pkg.tar.zst
 ```
 
 （AUR 上架后 `yay -S pkgtrans` 即可。）
@@ -129,17 +129,17 @@ winget show Neovim.Neovim                # 描述自动翻成中文
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install ./pkgtrans_1.2-1_all.deb
+sudo apt install ./pkgtrans_1.3-1_all.deb
 # 或
-sudo dpkg -i pkgtrans_1.2-1_all.deb
+sudo dpkg -i pkgtrans_1.3-1_all.deb
 ```
 
 ### Fedora / RHEL / openSUSE
 
 ```sh
-sudo rpm -ivh pkgtrans-1.2-1.noarch.rpm
+sudo rpm -ivh pkgtrans-1.3-1.noarch.rpm
 # 或
-sudo dnf install ./pkgtrans-1.2-1.noarch.rpm
+sudo dnf install ./pkgtrans-1.3-1.noarch.rpm
 ```
 
 ### Nix / NixOS
@@ -179,12 +179,12 @@ nix profile install github:IrisDream-Cubic/pkgtrans
 
 | 格式 | 文件 | 构建方式 |
 | --- | --- | --- |
-| Arch | `pkgtrans-1.2-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
-| deb | `pkgtrans_1.2-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
-| rpm | `pkgtrans-1.2-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
+| Arch | `pkgtrans-1.3-1-any.pkg.tar.zst` | `makepkg`（`packaging/PKGBUILD`） |
+| deb | `pkgtrans_1.3-1_all.deb` | `dpkg-deb -Zgzip`，没有 dpkg 时用 `packaging/build-deb.py` 手工组装 ar |
+| rpm | `pkgtrans-1.3-1.fcNN.noarch.rpm` | `rpmbuild -bb packaging/pkgtrans.spec` |
 | Windows | `pkgtrans-windows-x64.exe` | 在 **windows-latest** 上用 PyInstaller 打成单文件（不能在 Linux 上交叉编译） |
-| winget 清单 | `pkgtrans-1.2-winget-manifests.tar.gz` | `packaging/make-winget-manifest.py`，用真实 exe 的 sha256 生成 |
-| 源码 | `pkgtrans-1.2.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
+| winget 清单 | `pkgtrans-1.3-winget-manifests.tar.gz` | `packaging/make-winget-manifest.py`，用真实 exe 的 sha256 生成 |
+| 源码 | `pkgtrans-1.3.tar.gz` | `sh packaging/build-source-tarball.sh`（`git archive`，可重复构建） |
 | Nix | *不发布 tarball* | flake 就是交付方式，见上面「Nix / NixOS」 |
 
 一次性全构建：
@@ -213,7 +213,7 @@ exe sha256，解包后把 `manifests/` 整个目录提到
 [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) 即可：
 
 ```sh
-tar -xzf pkgtrans-1.2-winget-manifests.tar.gz
+tar -xzf pkgtrans-1.3-winget-manifests.tar.gz
 # fork winget-pkgs，把 manifests/ 下的四级目录原样拷进去，开 PR
 ```
 

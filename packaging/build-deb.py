@@ -71,8 +71,9 @@ def changelog_text(version: str) -> str:
   * 多 API Key 管理与失败自动回退，可锁定为只用一个
   * 目标语言可切换（简体 / 繁體 / 日本語 / 한국어 / 世界语 …）
   * setup / putes 管理 shell 集成，on / off 全局开关
+  * menu 交互式设置面板：包管理器开关 / 语言 / API Key 一处搞定
 
- -- {MAINTAINER}  Tue, 20 Oct 2026 12:00:00 +0800
+ -- {MAINTAINER}  Wed, 21 Oct 2026 12:00:00 +0800
 """
 
 

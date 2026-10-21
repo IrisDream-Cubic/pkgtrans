@@ -1,6 +1,6 @@
 # Maintainer: Toru Momose <iris@iris-dream.top>
 pkgname=pkgtrans
-pkgver=1.2
+pkgver=1.3
 pkgrel=1
 pkgdesc="用 AI 翻译 pacman / yay / paru / pamac / flatpak 搜索结果的描述文字"
 arch=('any')
