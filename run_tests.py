@@ -1270,6 +1270,7 @@ if "search" in argv:
         return code, text, saved
 
     DOWN, ENTER, SPACE, Q = b"\x1b[B", b"\r", b" ", b"q"
+    RIGHT, LEFT = b"\x1b[C", b"\x1b[D"
     N_MANAGERS = len(mod.KNOWN_MANAGERS)
 
     code, text, saved = tui_case([Q], "main")
@@ -1353,6 +1354,13 @@ if "search" in argv:
         check("光标模式：Key 屏提示 Enter 是设为优先",
               "设为优先" in text, text[-300:])
         check("光标模式：当前优先的 Key 标黄", "\x1b[33m" in text, text[-300:])
+
+        # 操作条：↓ 进条、→ 切换，选中项反显
+        code, text, saved = tui_case([DOWN, DOWN, ENTER, DOWN, RIGHT, Q, Q], "bar")
+        check("光标模式：操作按钮被选中时反显（\\x1b[7m）",
+              "\x1b[7m" in text, "没有反显转义")
+        check("光标模式：操作条同时高亮其它项（青色）",
+              "\x1b[36m[ " in text, text[-400:])
 
         # 帮助 / 关于
         code, text, saved = tui_case([DOWN, DOWN, DOWN, ENTER, Q, Q], "help")

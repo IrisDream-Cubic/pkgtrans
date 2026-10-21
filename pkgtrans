@@ -3238,7 +3238,7 @@ def menu_keys(st: Settings) -> None:
         width = max(display_width(str(k.get("provider", ""))) for k in keys)
         for k in keys:
             current = k.get("id") == preferred
-            name = _pad(str(k.get("provider", "")), width)
+            name = _pad(shorten(str(k.get("provider", "")), width), width)
             row = (f" *{(k.get('id')):>2}  {name}  {mask_key(k.get('key',''))}"
                    if current else
                    f"  {(k.get('id')):>2}  {name}  {mask_key(k.get('key',''))}")
@@ -3507,6 +3507,7 @@ def line_menu(st: Settings) -> int:
 
 TUI_BOLD = ESC + "1m"
 TUI_CYAN = ESC + "36m"
+TUI_REV = ESC + "7m"          # 反显：选中的操作按钮用这个，任何配色下都最显眼
 TUI_CLR = ESC + "K"          # 清到行尾
 TUI_HOME = ESC + "H"         # 光标回左上角
 TUI_HIDE = ESC + "?25l"
@@ -3642,7 +3643,7 @@ def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
             text = f"{mark} {_pad(label, 14)}{DIM}{value}{RESET}"
         else:
             text = f"   {_pad(label, 16)}{DIM}{value}{RESET}"
-        lines.append(_tui_row(i == focus, text)[:cols])
+        lines.append(_tui_row(i == focus, text))
     lines.append(MENU_RULE)
     if status:
         lines.append(f" {YELLOW}{status}{RESET}")
@@ -3786,15 +3787,33 @@ def tui_language(st: Settings) -> None:
         return
 
 
+def shorten(text: str, width: int, suffix: str = "…") -> str:
+    """按显示宽度截断（全角算 2 列）。"""
+    if display_width(text) <= width:
+        return text
+    out = ""
+    for ch in text:
+        if display_width(out + ch + suffix) > width:
+            break
+        out += ch
+    return out + suffix
+
+
 def _tui_bar(labels, pos, focused: bool) -> str:
-    """横排的方括号操作条。"""
+    """横排的方括号操作条。
+
+    选中项用**反显**（黑底白字 ↔ 白底黑字对调），比换前景色显眼得多；
+    整条没被选中时统一压暗。
+    """
     parts = []
     for i, label in enumerate(labels):
         text = f"[ {label} ]"
-        if i == pos:
-            text = (f"{TUI_BOLD}{TUI_CYAN}{text}{RESET}" if focused
-                    else f"{DIM}{text}{RESET}")
-        parts.append(text)
+        if focused and i == pos:
+            parts.append(f"{TUI_BOLD}{TUI_REV}{text}{RESET}")
+        elif focused:
+            parts.append(f"{TUI_CYAN}{text}{RESET}")
+        else:
+            parts.append(f"{DIM}{text}{RESET}")
     return "   " + "  ".join(parts)
 
 
@@ -3823,17 +3842,17 @@ def tui_keys(st: Settings) -> None:
         lines = ["", f" {TUI_BOLD}API Key{RESET}", ""]
         for i, k in enumerate(keys):
             current = k.get("id") == preferred
-            name = _pad(str(k.get("provider", "")), width)
+            name = _pad(shorten(str(k.get("provider", "")), width), width)
             body = f"{(k.get('id')):>2}  {name}  {mask_key(k.get('key',''))}"
             if current:
                 text = f"{YELLOW}*{body}{RESET}"
             else:
                 text = f" {body}"
-            lines.append(_tui_row(i == focus, text)[:cols])
+            lines.append(_tui_row(i == focus, text))
         if not keys:
             lines.append(f" {DIM}   （还没有 Key）{RESET}")
         lines.append("")
-        lines.append(_tui_bar(labels, bar_pos, focus == len(keys))[:cols])
+        lines.append(_tui_bar(labels, bar_pos, focus == len(keys)))
 
         first = next((k for k in keys if k.get("id") == preferred), keys[0]) if keys else None
         summary = (f"共 {len(keys)} 个，当前优先：{first.get('provider')}"
@@ -3995,8 +4014,8 @@ def tui_about(st: Settings) -> None:
                 text = f"{mark} {_pad(label, 16)}{DIM}{value}{RESET}"
             else:
                 text = f"   {_pad(label, 18)}{value}"
-            lines.append(_tui_row(i == focus, text)[:cols])
-        lines.append(_tui_row(focus == len(kinds), "   返回")[:cols])
+            lines.append(_tui_row(i == focus, text))
+        lines.append(_tui_row(focus == len(kinds), "   返回"))
         lines.append(MENU_RULE)
         if status:
             lines.append(f" {YELLOW}{status}{RESET}")
