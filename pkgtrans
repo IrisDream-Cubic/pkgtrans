@@ -2439,12 +2439,20 @@ def cmd_info(_st=None):
     return 0
 
 
-def do_show_config(st: Settings) -> int:
+def _config_lines(st: Settings):
+    """最终生效配置的文本行（行模式和光标界面共用）。"""
+    lines = []
     for key in sorted(DEFAULTS):
         val = st[key]
         if key in ("api_key",) and val:
             val = mask_key(str(val))
-        print(f"{key:<16}= {val}   [{st.sources.get(key, 'default')}]")
+        lines.append(f"{key:<16}= {val}   [{st.sources.get(key, 'default')}]")
+    return lines
+
+
+def do_show_config(st: Settings) -> int:
+    for line in _config_lines(st):
+        print(line)
     return 0
 
 
@@ -3297,7 +3305,7 @@ def line_menu(st: Settings) -> int:
             return 0
 
 
-# ---- 光标模式：↑/↓ 移动，Space/Enter 切换或打开，q 退出 ----
+# ---- 光标模式：↑/↓ 移动，Space 勾选，Enter 进下一层 / 确认，q 退出 ----
 
 TUI_BOLD = ESC + "1m"
 TUI_CYAN = ESC + "36m"
@@ -3452,7 +3460,7 @@ def tui_draw(st: Settings, rows, focus: int, status: str = "") -> None:
     lines.append(MENU_RULE)
     if status:
         lines.append(f" {GREEN}{status}{RESET}")
-    lines.append(f" {DIM}↑/↓ 移动   Space/Enter 切换或打开   q 退出{RESET}")
+    lines.append(f" {DIM}↑/↓ 移动   Space 勾选   Enter 打开   q 退出{RESET}")
     _tui_paint(lines)
 
 
@@ -3462,45 +3470,182 @@ def tui_message(text: str) -> None:
     read_key()
 
 
-def tui_language(st: Settings) -> None:
-    """语言单选：↑/↓ 移动，Enter 选定，q 取消。"""
-    current = str(st["target_lang"])
-    focus = next((i for i, (name, _c) in enumerate(MENU_LANG_CHOICES)
-                  if name == current), 0)
-    total = len(MENU_LANG_CHOICES) + 1          # 最后一档是「手动输入」
+def _tui_pick(title: str, options, hint: str = "↑/↓ 移动   Enter 确认   q 返回",
+              footer=(), initial: int = 0):
+    """通用的二级界面：一列选项 + 光标。
+
+    ↑/↓ 移动，**Enter 执行 / 确认**，q 或 Esc 返回 None。
+    footer 是底部要额外显示的说明行（比如「本平台不支持」）。
+    """
+    total = max(1, len(options))
+    focus = max(0, min(initial, total - 1))
     while True:
-        lines = ["", f" {TUI_BOLD}目标语言{RESET}",
-                 f" {DIM}↑/↓ 选择   Enter 确认   q 取消{RESET}", ""]
-        for i, (name, _code) in enumerate(MENU_LANG_CHOICES):
-            mark = (GREEN + "(*)" + RESET) if i == focus else (DIM + "( )" + RESET)
-            lines.append(_tui_row(i == focus, f"{mark} {name}"))
-        mark = (GREEN + "(*)" + RESET) if focus == total - 1 else (DIM + "( )" + RESET)
-        lines.append(_tui_row(focus == total - 1, f"{mark} 手动输入其它"))
+        lines = ["", f" {TUI_BOLD}{title}{RESET}", ""]
+        for i, label in enumerate(options):
+            lines.append(_tui_row(i == focus, label))
+        if footer:
+            lines += [""] + list(footer)
+        lines += ["", f" {DIM}{hint}{RESET}"]
         _tui_paint(lines)
         key = read_key()
         if key in ("q", "Q", "ESC", "EOF"):
-            return
+            return None
         if key in ("UP", "k"):
             focus = (focus - 1) % total
         elif key in ("DOWN", "j"):
             focus = (focus + 1) % total
-        elif key in ("ENTER", "SPACE"):
-            if focus == total - 1:
-                write_stdout(TUI_SHOW + "\n 输入语言名或代码（如 zh-hant / 日本語）> ")
-                try:
-                    custom = sys.stdin.readline().strip()
-                except (OSError, KeyboardInterrupt):
-                    return
-                if not custom:
-                    return
-                lang = resolve_language(custom)
-            else:
-                lang = resolve_language(MENU_LANG_CHOICES[focus][1])
-            if not lang:
-                return
-            if update_config_value(st.config_path, "target_lang", lang):
-                st.set("target_lang", lang, "cli")
+        elif key == "ENTER":
+            return focus
+
+
+def _tui_text_input(st: Settings, prompt: str):
+    """临时回到行模式收一行文本。"""
+    write_stdout(TUI_SHOW + "\n " + prompt)
+    try:
+        line = sys.stdin.readline()
+    except (OSError, KeyboardInterrupt):
+        return None
+    return line.strip() if line else None
+
+
+def tui_language(st: Settings) -> None:
+    """二级界面：目标语言（单选）。"""
+    current = str(st["target_lang"])
+    labels = [name for name, _code in MENU_LANG_CHOICES]
+    options = [f"(*) {name}" if name == current else f"( ) {name}" for name in labels]
+    options.append("+ 手动输入其它")
+    options.append("返回")
+    initial = labels.index(current) if current in labels else 0
+    while True:
+        idx = _tui_pick("目标语言", options, initial=initial,
+                        hint="↑/↓ 选择   Enter 确认   q 返回")
+        if idx is None or idx == len(options) - 1:
             return
+        if idx == len(labels):
+            custom = _tui_text_input(st, "输入语言名或代码（如 zh-hant / 日本語）> ")
+            if not custom:
+                continue
+            lang = resolve_language(custom) or custom
+        else:
+            lang = resolve_language(MENU_LANG_CHOICES[idx][1])
+        if not lang:
+            continue
+        if update_config_value(st.config_path, "target_lang", lang):
+            st.set("target_lang", lang, "cli")
+        return
+
+
+def tui_keys(st: Settings) -> None:
+    """二级界面：API Key 管理。"""
+    while True:
+        keys, preferred, locked = load_keys(st.keys_path)
+        options = []
+        for k in keys:
+            star = "*" if k.get("id") == preferred else " "
+            options.append(f"{star} {k.get('id'):>2}  {str(k.get('provider','')):<10}"
+                           f"  {mask_key(k.get('key',''))}")
+        options += ["+ 添加 API Key", "* 设为优先", "- 删除",
+                    "[解锁] 失败时自动切换备用" if locked else "[锁定] 只用优先 Key",
+                    "返回"]
+        footer = [f" {DIM}共 {len(keys)} 个"
+                  + (f"，优先：{next((k.get('provider') for k in keys if k.get('id') == preferred), keys[0].get('provider'))}" if keys else "，当前用配置文件 / 环境变量")
+                  + ("，已锁定" if locked else "") + RESET]
+        idx = _tui_pick("API Key", options, footer=footer)
+        if idx is None:
+            return
+        n_keys = len(keys)
+        if idx == n_keys:                      # 添加
+            menu_add_key(st)
+        elif idx == n_keys + 1:                # 设为优先
+            if not keys:
+                continue
+            pick = _tui_pick("设为优先", [f"{k.get('id')}  {k.get('provider')}"
+                                          for k in keys] + ["返回"])
+            if pick is not None and pick < n_keys:
+                cmd_keyprefer(st, [str(keys[pick].get("id"))])
+        elif idx == n_keys + 2:                # 删除
+            if not keys:
+                continue
+            pick = _tui_pick("删除", [f"{k.get('id')}  {k.get('provider')}"
+                                      for k in keys] + ["返回"])
+            if pick is not None and pick < n_keys:
+                cmd_keyremove(st, [str(keys[pick].get("id"))])
+        elif idx == n_keys + 3:                # 锁定 / 解锁
+            cmd_keylock(st, not locked)
+        else:
+            return
+
+
+def install_plan(st: Settings):
+    """可行的安装动作：(名字, 是否可自动装)，以及本平台不支持的命令。"""
+    plat = current_platform()
+    installed = set(installed_managers())
+    actions = []
+    for name in platform_managers():
+        if name in installed:
+            continue
+        auto = ((name == "winget" and plat == "windows")
+                or (name == "brew" and plat == "macos"))
+        actions.append((name, auto))
+    hidden = [m for m in KNOWN_MANAGERS
+              if m not in platform_managers() and m not in installed]
+    return actions, hidden
+
+
+def tui_install(st: Settings) -> None:
+    """二级界面：安装包管理器。"""
+    plat = current_platform()
+    while True:
+        actions, hidden = install_plan(st)
+        options = []
+        for name, auto in actions:
+            if auto:
+                options.append(f"{name:<12} 自动安装" if name == "winget"
+                               else f"{name:<12} 运行 Homebrew 官方安装脚本")
+            elif name in AUR_ONLY:
+                options.append(f"{name:<12} AUR 包，用 AUR 助手装（如 yay -S {name}）")
+            else:
+                options.append(f"{name:<12} 手动安装："
+                               + INSTALL_HINTS.get(plat, "用系统包管理器安装 {name}").format(name=name))
+        if not options:
+            options = ["（该装的都装好了）"]
+        options.append("返回")
+        footer = []
+        if hidden:
+            owners = sorted({MANAGER_META[m][0] for m in hidden})
+            footer = [f" {YELLOW}本平台不支持：{'、'.join(hidden)}{RESET}",
+                      f" {DIM}（属于 {'、'.join(PLATFORM_SHORT.get(o, o) for o in owners)}）{RESET}"]
+        idx = _tui_pick("安装包管理器", options, footer=footer)
+        if idx is None or idx >= len(actions) or not actions:
+            return
+        name, auto = actions[idx]
+        if not auto:
+            continue                            # 只是提示，Enter 不做事
+        confirm = _tui_pick(f"确认安装 {name}？",
+                            ["是，开始安装", "返回"],
+                            hint="Enter 确认   q 返回")
+        if confirm != 0:
+            continue
+        if name == "winget":
+            write_stdout(TUI_SHOW + "\n")
+            cmd_install_winget(st, [])
+            tui_message("按任意键返回")
+        elif name == "brew":
+            write_stdout(TUI_SHOW + "\n")
+            eprint("  运行 Homebrew 官方安装脚本（要联网下载，可能需要几分钟）…")
+            proc = subprocess.run(
+                ["/bin/bash", "-c",
+                 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL '
+                 'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'])
+            tui_message("装好了，按任意键返回" if proc.returncode == 0
+                        else f"安装失败（退出码 {proc.returncode}），按任意键返回")
+
+
+def tui_config(st: Settings) -> None:
+    """二级界面：最终生效的配置（只读）。"""
+    lines = _config_lines(st)
+    _tui_pick("最终生效的配置", ["返回"], hint="Enter / q 返回",
+              footer=[""] + [f" {l}" for l in lines])
 
 
 def tui_main(st: Settings) -> int:
@@ -3519,23 +3664,31 @@ def tui_main(st: Settings) -> int:
                 return 0
             if key in ("UP", "k"):
                 focus = (focus - 1) % len(rows)
-            elif key in ("DOWN", "j"):
+                continue
+            if key in ("DOWN", "j"):
                 focus = (focus + 1) % len(rows)
-            elif key in ("ENTER", "SPACE"):
-                row = rows[focus]
-                if row["kind"] == "manager":
+                continue
+            row = rows[focus]
+            is_box = row["kind"] == "manager"
+            # Space 只管勾选；Enter 只负责「进下一层 / 确认」，两者不再混用
+            if key == "SPACE":
+                if is_box:
                     _menu_toggle(st, row["name"])
                     status = (f"{row['name']} 已取消接管" if row["active"]
                               else f"{row['name']} 已接管")
+                else:
+                    status = "这一项要用 Enter 打开"
+            elif key == "ENTER":
+                if is_box:
+                    status = f"{row['name']}：用 Space 勾选 / 取消"
                 elif row["kind"] == "lang":
                     tui_language(st)
                 elif row["kind"] == "keys":
-                    menu_keys(st)          # 需要粘贴文本，走行模式
+                    tui_keys(st)
                 elif row["kind"] == "install":
-                    menu_install(st)
+                    tui_install(st)
                 elif row["kind"] == "config":
-                    do_show_config(st)
-                    tui_message("按任意键返回")
+                    tui_config(st)
                 elif row["kind"] == "quit":
                     return 0
             else:

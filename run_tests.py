@@ -1172,18 +1172,26 @@ if "search" in argv:
     tui_cfg = os.path.join(tui_home, "config")
     tui_keys = os.path.join(tui_home, "keys.json")
 
-    code, text = run_tty(["menu"], [b"\x1b[B", b" ", b"q"],
-                         config=tui_cfg, keys_file=tui_keys, home=tui_home)
+    def tui_case(keys, name):
+        """每个用例用独立的 HOME / 配置，避免互相干扰。"""
+        home = tempfile.mkdtemp(prefix=f"pkgtrans-tui-{name}-")
+        cfg = os.path.join(home, "config")
+        code, text = run_tty(["menu"], keys, config=cfg,
+                             keys_file=os.path.join(home, "keys.json"), home=home)
+        saved = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else ""
+        return code, text, saved
+
+    code, text, saved = tui_case([b"\x1b[B", b" ", b"q"], "space")
     if code is None:
         print("  SKIP  当前平台没有 pty，跳过光标模式")
     else:
         check("光标模式：渲染出光标和复选框",
               "❯" in text and "[✓]" in text and "[ ]" in text, text[-400:])
-        check("光标模式：给出按键提示", "↑/↓" in text, text[-200:])
+        check("光标模式：提示里把 Space 和 Enter 分开写",
+              "Space" in text and "Enter" in text, text[-260:])
         check("光标模式：q 能退出，退出码 0", code == 0, code)
         check("光标模式：↓ 到第 2 项后空格切换的是 yay", "yay 已" in text,
               text[-300:])
-        saved = open(tui_cfg, encoding="utf-8").read() if os.path.exists(tui_cfg) else ""
         check("光标模式：切换结果写进配置", "shell_targets" in saved, saved[:200])
 
         # 包管理器行数不是固定的：平台命令 + 虽然不属于本平台但确实装了的
@@ -1194,13 +1202,38 @@ if "search" in argv:
         finally:
             os.environ.pop("PSTRANS_PLATFORM", None)
 
-        # 跳过所有包管理器行到「目标语言」：下移 N 次 + Enter 打开，
-        # 再下移到繁體中文 + Enter 确认，最后 q 退出
-        code, text = run_tty(["menu"],
-                             [b"\x1b[B"] * n_managers + [b"\r", b"\x1b[B", b"\r", b"q"],
-                             config=tui_cfg, keys_file=tui_keys, home=tui_home)
-        saved = open(tui_cfg, encoding="utf-8").read() if os.path.exists(tui_cfg) else ""
-        check("光标模式：语言屏能用方向键选中繁體中文",
+        # Enter 不再等于 Space：在复选框行上只提示，不切换
+        code, text, saved = tui_case([b"\x1b[B", b"\r", b"q"], "enter-on-manager")
+        check("光标模式：在包管理器行按 Enter 不切换，只提示用 Space",
+              "用 Space" in text and "shell_targets" not in saved,
+              f"{saved[:120]} | {text[-220:]}")
+
+        # Enter 在操作行上进入二级界面，q 只返回、不退出
+        code, text, saved = tui_case(
+            [b"\x1b[B"] * n_managers + [b"\r", b"q", b"q"], "lang")
+        check("光标模式：Enter 打开「目标语言」二级界面",
+              "手动输入其它" in text and "返回" in text, text[-420:])
+        check("光标模式：二级界面里 q 只返回，程序仍然正常退出", code == 0, code)
+
+        code, text, saved = tui_case(
+            [b"\x1b[B"] * (n_managers + 1) + [b"\r", b"q", b"q"], "keys")
+        check("光标模式：Enter 打开「API Key」二级界面",
+              "添加 API Key" in text and "设为优先" in text, text[-420:])
+
+        code, text, saved = tui_case(
+            [b"\x1b[B"] * (n_managers + 2) + [b"\r", b"q", b"q"], "install")
+        check("光标模式：Enter 打开「安装包管理器」二级界面",
+              "安装包管理器" in text and "返回" in text, text[-500:])
+
+        code, text, saved = tui_case(
+            [b"\x1b[B"] * (n_managers + 3) + [b"\r", b"q", b"q"], "config")
+        check("光标模式：Enter 打开「最终配置」二级界面",
+              "target_lang" in text and "api_style" in text, text[-700:])
+
+        # 语言二级界面里 Enter 确认后写盘
+        code, text, saved = tui_case(
+            [b"\x1b[B"] * n_managers + [b"\r", b"\x1b[B", b"\r", b"q"], "lang-pick")
+        check("光标模式：语言二级界面用 Enter 确认并落盘",
               "target_lang = 繁體中文" in saved, f"n={n_managers} {saved[:300]}")
 
     code, out, err = run(["menu"], stdin=b"q\n",

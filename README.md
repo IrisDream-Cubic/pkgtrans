@@ -314,8 +314,7 @@ pkgtrans aim 文言文           # 不认识的直接当语言名用
 
 ## 交互式设置面板
 
-不想记子命令的话，直接开面板——**光标操作**，`↑`/`↓` 移动、`Space`/`Enter` 切换或
-打开、`q` 退出：
+不想记子命令的话，直接开面板——**光标操作**：
 
 ```sh
 pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
@@ -344,17 +343,38 @@ pkgtrans menu        # 别名：pkgtrans ui / pkgtrans config
  本平台不支持：apt、apt-cache、dnf、yum、zypper、brew、winget
    （属于 Debian 系、Fedora 系、macOS、openSUSE、Windows）
 --------------------------------------------------------------
- pacman 已取消接管
- ↑/↓ 移动   Space/Enter 切换或打开   q 退出
+ ↑/↓ 移动   Space 勾选   Enter 打开   q 退出
 ```
 
-- `[✓]` 表示已接管，`Space` 立刻切换并落盘（重开窗口后生效），底部会显示刚才做了什么。
-- **本平台不支持的命令单独列在末尾并标注归属**，不会被当成可选项误导你。
-- **安装包管理器**：Windows 上能一键装 winget（下官方 App Installer），macOS 上能
-  跑 Homebrew 官方脚本；其它平台给出对应的安装命令（`sudo apt install flatpak`
-  之类），AUR 才有的 `yay` / `paru` 会单独提示。
-- **目标语言**是单选列表（`↑`/`↓` + `Enter`），10 种预置或手填；**API Key** 子菜单
-  可以添加 / 设为优先 / 删除 / 锁定。
+**两个键分工明确，不混用：**
+
+| 按键 | 在包管理器行 | 在「其它」行 |
+| --- | --- | --- |
+| **Space** | 勾选 / 取消勾选（立刻落盘）| 提示「这一项要用 Enter 打开」|
+| **Enter** | 提示「用 Space 勾选 / 取消」| **进入二级界面 / 执行** |
+
+### 二级界面
+
+语言、API Key、安装、配置都是独立的一屏，`↑/↓` 移动、`Enter` 确认、`q` 返回
+（只回到主界面，不会退出程序）。
+
+```
+ 目标语言                          API Key
+ ❯ (*) 简体中文                    ❯ + 添加 API Key
+   ( ) 繁體中文                      * 设为优先
+   ( ) 日本語                        - 删除
+   ( ) 한국어                        [锁定] 只用优先 Key
+   ...                               返回
+   ( ) Русский
+   + 手动输入其它                    共 1 个，优先：DeepSeek
+   返回
+ ↑/↓ 选择   Enter 确认   q 返回      ↑/↓ 移动   Enter 确认   q 返回
+```
+
+- **目标语言**：单选，`Enter` 确认后立刻写进配置；选「手动输入其它」会切回行模式让你打字。
+- **API Key**：添加 / 设为优先 / 删除 / 锁定，选「添加」「设为优先」「删除」会再进一层让你挑编号或填密钥。
+- **安装包管理器**：Windows 一键装官方 App Installer、macOS 跑 Homebrew 官方脚本（都会先要一次确认），其它平台给出对应安装命令；AUR 才有的 `yay` / `paru` 单独说明。
+- **最终配置**：只读，`Enter` / `q` 返回。
 
 ### 没有终端时自动退回编号模式
 
@@ -555,7 +575,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **178 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **184 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
@@ -566,7 +586,7 @@ python3 ~/.local/share/pkgtrans/run_tests.py
   失败时逐字节还原
 - 平台感知：六种平台各自该显示哪些命令、跨平台接管被拒绝、`PSTRANS_PLATFORM` 覆盖
 - 设置面板：`menu` 编号模式渲染、切换接管、改目标语言、加 API Key、各平台的安装入口与「本平台不支持」警示、EOF 干净退出；
-  **光标模式用 pty 模拟真实按键测**（↑/↓ 移动、Space 切换、语言单选、`PSTRANS_PLAIN` 退回）
+  **光标模式用 pty 模拟真实按键测**（↑/↓ 移动、Space 勾选、Enter 进二级界面、二级界面里 q 只返回、语言单选落盘、`PSTRANS_PLAIN` 退回）
 - 子命令：`keyadd/keylist/keyprefer/keyremove/keylock/keyunlock`、
   `aim`（含 `zh-hant` `eo-latn` `default`）、`on/off`、`setup/putes/putesy`、
   `install-winget`、`info`、`help`
