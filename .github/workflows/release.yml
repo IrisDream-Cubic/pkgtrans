@@ -24,12 +24,21 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
+      # 先核对 tag 和源码里的版本号：只从 tag 取版本的话，tag 打成 v1.3、
+      # 代码里还是 1.2 也能发出去，包名和 `pkgtrans --version` 就对不上了。
+      - uses: actions/checkout@v4
       - id: v
         env:
           INPUT: ${{ github.event.inputs.version }}
         run: |
           v="${INPUT:-${GITHUB_REF_NAME}}"
           v="${v#v}"
+          src=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' pkgtrans | head -1)
+          echo "tag 版本：$v    源码 __version__：$src"
+          if [ "$v" != "$src" ]; then
+            echo "::error::tag 是 v$v，但 pkgtrans 里写的是 $src —— 打出来的包会名不符实"
+            exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "tag=v$v"     >> "$GITHUB_OUTPUT"
           echo "版本号：$v（tag：v$v）"
