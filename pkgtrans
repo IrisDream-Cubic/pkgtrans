@@ -3583,11 +3583,26 @@ def read_key() -> str:
             return "EOF"
         if first == b"\x1b":
             seq = b""
-            while len(seq) < 2:
+            while len(seq) < 8:
                 ready, _, _ = select.select([fd], [], [], 0.03)
                 if not ready:
                     break
                 seq += os.read(fd, 1)
+                if seq.startswith(b"[200~") or seq.startswith(b"[201~"):
+                    break
+            # 终端开着 bracketed paste 时，粘贴会以 ESC[200~ 开头、ESC[201~ 结尾。
+            # 不特殊处理的话这个 ESC 会被当成「退出」，菜单一关，剩下的粘贴内容
+            # 就全漏进 shell 了（会看到 zsh: bad pattern: [200~git ...）。
+            if seq.startswith(b"[200~") or seq.startswith(b"[201~"):
+                deadline = time.time() + 0.5
+                while time.time() < deadline:
+                    ready, _, _ = select.select([fd], [], [], 0.05)
+                    if not ready:
+                        break
+                    chunk = os.read(fd, 4096)
+                    if not chunk or b"[201~" in chunk:
+                        break
+                return ""
             return {b"[A": "UP", b"OA": "UP", b"[B": "DOWN", b"OB": "DOWN",
                     b"[C": "RIGHT", b"OC": "RIGHT",
                     b"[D": "LEFT", b"OD": "LEFT"}.get(seq, "ESC")

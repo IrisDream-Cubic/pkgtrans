@@ -1362,6 +1362,13 @@ if "search" in argv:
         check("光标模式：操作条同时高亮其它项（青色）",
               "\x1b[36m[ " in text, text[-400:])
 
+        # 在菜单里粘贴一段命令：应当被忽略，而不是被当成 ESC 退出、
+        # 再把剩下的内容漏进 shell
+        paste = b"\x1b[200~git push origin main\n\x1b[201~"
+        code, text, saved = tui_case([paste, Q], "paste")
+        check("光标模式：粘贴内容被忽略，不会误退出",
+              "包管理器" in text and code == 0, f"code={code}")
+
         # 帮助 / 关于
         code, text, saved = tui_case([DOWN, DOWN, DOWN, ENTER, Q, Q], "help")
         check("光标模式：Enter 打开「帮助」", "命令行用法" in text, text[-600:])

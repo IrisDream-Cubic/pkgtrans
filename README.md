@@ -588,7 +588,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **205 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **206 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
