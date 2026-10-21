@@ -3179,17 +3179,18 @@ def render_managers(st: Settings) -> None:
     for index, row in enumerate(rows, 1):
         if not row["available"]:
             if not locked_header:
-                lines += ["", f" {dim}本平台不支持{reset}"]
+                lines += ["", f" {dim}不可用（选中查看原因）{reset}"]
                 locked_header = True
-            lines.append(f" {index:>3}  {red}[×]{reset} {dim}{row['name']:<12}"
-                         f"{manager_block_reason(row)}{reset}")
+            state = "已安装" if row["installed"] else "未安装"
+            lines.append(f" {index:>3}  {red}[×]{reset} {red}{row['name']:<12}{reset}"
+                         f" {dim}{state}{reset}")
             continue
         if not row["installed"] and not row["active"]:
             lines.append(f" {index:>3}  {dim}[ ] {row['name']:<12}未安装{reset}")
             continue
         box = (green + "[✓]" + reset) if row["active"] else "[ ]"
-        lines.append(f" {index:>3}  {box} {row['name']:<12}"
-                     + ("" if row["active"] else "未接管"))
+        tail = "已安装" if row["installed"] else "未安装"
+        lines.append(f" {index:>3}  {box} {row['name']:<12}{tail}")
     lines += ["", "    i  安装包管理器", "    q  返回"]
     lines.append(MENU_RULE)
     write_stdout("\n".join(lines) + "\n")
@@ -3627,15 +3628,17 @@ def tui_managers(st: Settings) -> None:
         for i, row in enumerate(rows):
             if not row["available"]:
                 if not locked_header:
-                    lines += ["", f" {DIM}本平台不支持{RESET}"]
+                    lines += ["", f" {DIM}不可用（选中查看原因）{RESET}"]
                     locked_header = True
+                state = "已安装" if row["installed"] else "未安装"
                 text = (f"{RED}[×]{RESET} {RED}{row['name']:<13}{RESET}"
-                        f"{manager_block_reason(row)}")
+                        f"{DIM}{state}{RESET}")
             elif not row["installed"] and not row["active"]:
                 text = f"{DIM}[ ] {row['name']:<13}未安装{RESET}"
             else:
                 box = (GREEN + "[✓]" + RESET) if row["active"] else "[ ]"
-                text = f"{box} {row['name']:<13}" + ("" if row["active"] else "未接管")
+                text = f"{box} {row['name']:<13}" + ("已安装" if row["installed"]
+                                                    else "未安装")
             lines.append(_tui_row(i == focus, text)[:shutil.get_terminal_size((80, 24)).columns])
         lines += ["", MENU_RULE]
         if status:

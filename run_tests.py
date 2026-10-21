@@ -1191,9 +1191,18 @@ if "search" in argv:
     check("包管理器屏：列出全部命令",
           all(m in body for m in mod.KNOWN_MANAGERS), body[:600])
     check("包管理器屏：没装的标灰", "未安装" in body, body[:600])
-    check("包管理器屏：平台不支持的标 [×] 并说明原因",
-          "[×]" in body and "仅在" in body and "当前系统" in body, body[-700:])
+    check("包管理器屏：不可用的标红 [×]，但列表里不写是哪个系统",
+          "[×]" in body and "仅在" not in body and "macOS" not in body, body[-700:])
     check("包管理器屏：给出安装入口", "安装包管理器" in body, body[-500:])
+
+    locked_idx = next((int(line.split()[0]) for line in body.splitlines()
+                       if "[×]" in line), None)
+    check("包管理器屏：红色项也带编号（能选中以便给提示）",
+          locked_idx is not None, body[-500:])
+    if locked_idx:
+        code, out, err = menu2(stdin=f"1\n{locked_idx}\nq\nq\n".encode(), path=with_bin)
+        check("包管理器屏：选中红色项才提示它属于哪个系统",
+              "仅在" in err and "当前系统" in err, f"{err!r}"[:240])
 
     with open(menu_cfg, "w", encoding="utf-8") as fh:
         fh.write("shell_targets = none\n")     # 基线：一个都没接管
@@ -1283,8 +1292,7 @@ if "search" in argv:
               "[✓]" in text or "[ ]" in text, text[-600:])
         check("光标模式：包管理器屏列出全部命令",
               all(m in text for m in mod.KNOWN_MANAGERS), text[-900:])
-        check("光标模式：平台不支持的标红并说明原因",
-              "[×]" in text and "仅在" in text, text[-900:])
+        check("光标模式：不可用的标红 [×]", "[×]" in text, text[-900:])
 
         # 主界面上按 Space 只提示用 Enter
         code, text, saved = tui_case([SPACE, Q], "space-main")

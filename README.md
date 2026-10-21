@@ -373,19 +373,19 @@ pkgtrans            # 直接打开（等价于 pkgtrans menu / ui / config）
 
  勾选的会被接管；没装的要先把包装上
 
- ❯ [✓] pacman
-   [✓] yay
-   [✓] pamac
-   [✓] flatpak
-   [ ] paru         未安装
- 本平台不支持
-   [×] apt          apt仅在Debian 系上可用（当前系统：Arch 系）
-   [×] apt-cache    apt-cache仅在Debian 系上可用（当前系统：Arch 系）
-   [×] dnf          dnf仅在Fedora 系上可用（当前系统：Arch 系）
-   [×] yum          yum仅在Fedora 系上可用（当前系统：Arch 系）
-   [×] zypper       zypper仅在openSUSE上可用（当前系统：Arch 系）
-   [×] brew         brew仅在macOS上可用（当前系统：Arch 系）
-   [×] winget       winget仅在Windows上可用（当前系统：Arch 系）
+ ❯ [✓] pacman      已安装
+   [✓] yay         已安装
+   [✓] pamac       已安装
+   [✓] flatpak     已安装
+   [ ] paru        未安装
+ 不可用（选中查看原因）
+   [×] apt         未安装
+   [×] apt-cache   未安装
+   [×] dnf         未安装
+   [×] yum         未安装
+   [×] zypper      未安装
+   [×] brew        未安装
+   [×] winget      未安装
 --------------------------------------------------------------
  ↑/↓ 移动   Space 勾选   i 安装   q 返回
 ```
@@ -396,7 +396,7 @@ pkgtrans            # 直接打开（等价于 pkgtrans menu / ui / config）
 | --- | --- | --- |
 | 已装、可接管 | `[✓]` / `[ ]` + 命令名 | 能 |
 | **没装**（本平台能用但系统里没有）| 灰色 `[ ]` + `未安装` | **不能**，按 Space 会告诉你装它的命令 |
-| **平台不支持** | 红色 `[×]` + `仅在 XXX 上可用（当前系统：YYY）` | **不能**，按 Space 只给原因 |
+| **平台不支持** | 红色 `[×]`，列表里只写 `未安装` | **不能**，按 Space 才告诉你 `仅在 XXX 上可用（当前系统：YYY）` |
 
 按 `i` 进入「安装包管理器」：Windows 一键装官方 App Installer、macOS 跑 Homebrew
 官方脚本（都会先要一次确认），其它平台给出对应安装命令；AUR 才有的 `yay` /
@@ -575,7 +575,7 @@ shell 里只把 `pacman` / `yay` / `paru` / `pamac` / `flatpak` / `apt` / `apt-c
 python3 ~/.local/share/pkgtrans/run_tests.py
 ```
 
-不联网、不需要真实密钥，用本地 mock API 覆盖 **196 项**断言：
+不联网、不需要真实密钥，用本地 mock API 覆盖 **198 项**断言：
 
 - 翻译链路：成功 / 500 / 401、批量与去重、缓存命中、熔断边界、部分返回补译
 - 畸形返回：```` ```json ```` 围栏、包在对象里、前后带废话、只返回部分
